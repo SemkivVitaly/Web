@@ -79,3 +79,4 @@ cd ../server && npm install && npm start
 - **Frontend**: React + Vite, Socket.io-client.
 
 Данные и файлы остаются на машине, где запущен сервер.
+docker compose up --build -d
