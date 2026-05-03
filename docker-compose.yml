@@ -1,0 +1,53 @@
+# LocalChat: API + веб + OnlyOffice (документы Word/Excel в группах).
+#
+# Запуск:  docker compose up --build -d
+# Открыть: http://localhost:3780  · по имени: http://localchat:3780 (см. docs/LAN-HOSTNAME.md)
+# OnlyOffice: порт на хосте задаётся ONLYOFFICE_PORT в .env (по умолчанию 8081), внутри контейнера всегда :80
+#
+# Доступ с других устройств в LAN:
+#   1) В .env укажите LAN_HOST=<IP этого ПК в Wi‑Fi/Ethernet> (например 192.168.1.10).
+#   2) С телефона/ноутбука откройте http://<LAN_HOST>:3780
+#   Без LAN_HOST по умолчанию OnlyOffice в браузере остаётся на localhost — с других ПК не откроется.
+#
+# Отключить OnlyOffice (только встроенный редактор): в .env укажите
+#   ONLYOFFICE_DOCUMENT_SERVER_URL=
+# или удалите сервис onlyoffice и задайте пустую переменную через override.
+
+services:
+  localchat:
+    build: .
+    container_name: localchat
+    ports:
+      - '3780:3780'
+    depends_on:
+      - onlyoffice
+    environment:
+      NODE_ENV: production
+      PORT: '3780'
+      HOST: 0.0.0.0
+      JWT_SECRET: ${JWT_SECRET:-docker-dev-change-jwt-secret}
+      # В production список origin обязателен; для LAN добавьте http://<LAN_HOST>:3780 через переменную ниже
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3780,http://127.0.0.1:3780,http://localchat:3780,http://${LAN_HOST:-localhost}:3780}
+      # Скрипт редактора в браузере — тот же порт, что в onlyoffice.ports (ONLYOFFICE_PORT → хост, внутри :80)
+      ONLYOFFICE_DOCUMENT_SERVER_URL: ${ONLYOFFICE_DOCUMENT_SERVER_URL:-http://${LAN_HOST:-localhost}:${ONLYOFFICE_PORT:-8081}}
+      # URL API для скачивания файла и callback — с контейнера onlyoffice надёжнее имя сервиса compose (не host.docker.internal:
+      # на части хостов/WSL фаервол ломает доступ к API, документы не открываются). LAN_HOST ниже — только для браузера и CORS.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localchat:3780}
+    volumes:
+      - localchat_data:/app/server/data
+      - localchat_uploads:/app/server/uploads
+
+  onlyoffice:
+    image: onlyoffice/documentserver:latest
+    container_name: localchat-onlyoffice
+    ports:
+      - '${ONLYOFFICE_PORT:-8081}:80'
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    environment:
+      JWT_ENABLED: 'false'
+      ALLOW_PRIVATE_IP_ADDRESS: 'true'
+
+volumes:
+  localchat_data:
+  localchat_uploads:

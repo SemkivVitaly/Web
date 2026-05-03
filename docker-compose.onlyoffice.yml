@@ -1,0 +1,3 @@
+# Устарело: OnlyOffice теперь входит в основной docker-compose.yml (сервис onlyoffice).
+# Используйте:  docker compose up -d
+# в корне репозитория.
