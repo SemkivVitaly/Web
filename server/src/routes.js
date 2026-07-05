@@ -11,17 +11,15 @@
 
 import express from 'express';
 import fs from 'node:fs';
-import { randomBytes } from 'crypto';
 import { getDb } from './db.js';
-import { hashPassword, verifyPassword, signToken, generateTag } from './auth.js';
+import { hashPassword, verifyPassword, signToken } from './auth.js';
 import { requireAuth } from './middleware.js';
 import { parseMentionTags, parseExtraMentionUserIdsFromBody } from './mentions.js';
 import { upload, detectKind, uploadsDir, normalizePossibleMultipartFilename } from './upload.js';
 import { appendWorkspaceRoutes } from './workspaceRoutes.js';
 import { writeAudit } from './auditLog.js';
 import { appendOnlyOfficeRoutes } from './onlyOfficeRoutes.js';
-import { maskProfanity } from './profanityFilter.js';
-import { shouldMaskGroupTextForViewer } from './moderation.js';
+import { appendAnnouncementRoutes } from './announcementRoutes.js';
 import { createRateLimiter } from './rateLimit.js';
 import { unlinkOrphanMessageAttachmentFiles } from './uploadCleanup.js';
 
@@ -403,7 +401,14 @@ export function createApiRouter(io) {
     return { userId: num };
   }
 
+  function isGroupBanned(groupId, userId) {
+    return !!db
+      .prepare(`SELECT 1 FROM group_bans WHERE group_id = ? AND user_id = ?`)
+      .get(groupId, userId);
+  }
+
   function isBannedMember(groupId, userId) {
+    if (isGroupBanned(groupId, userId)) return true;
     const m = db
       .prepare(
         `SELECT banned_until FROM group_members WHERE group_id = ? AND user_id = ?`
@@ -504,36 +509,31 @@ export function createApiRouter(io) {
     const { username, password, displayName } = req.body || {};
     if (!username || !password || !displayName)
       return res.status(400).json({ error: 'username, password, displayName обязательны' });
-    const exists = db.prepare(`SELECT id FROM users WHERE username = ? COLLATE NOCASE`).get(username);
-    if (exists) return res.status(409).json({ error: 'Имя пользователя занято' });
-    const password_hash = hashPassword(password);
     const uname = String(username).trim();
     const dname = String(displayName).trim();
+    // Тег = ровно то, что ввёл пользователь (без авто-суффиксов). Допустимы латиница, цифры, _.
+    const tag = uname.toLowerCase();
+    if (!/^[a-z0-9_]{3,32}$/.test(tag))
+      return res.status(400).json({
+        error: 'Имя пользователя: 3–32 символа, латиница, цифры и _ (без пробелов и других символов)',
+      });
+    const exists = db.prepare(`SELECT id FROM users WHERE username = ? COLLATE NOCASE`).get(uname);
+    if (exists) return res.status(409).json({ error: 'Имя пользователя занято' });
+    const tagClash = db.prepare(`SELECT id FROM users WHERE tag = ? COLLATE NOCASE`).get(tag);
+    if (tagClash) return res.status(409).json({ error: 'Имя пользователя занято' });
+    const password_hash = hashPassword(password);
     let userId = null;
-    for (let attempt = 0; attempt < 64; attempt++) {
-      const tag =
-        attempt === 0
-          ? generateTag(username)
-          : generateTag(`${username}_${randomBytes(3).toString('hex')}`);
-      try {
-        const info = db
-          .prepare(
-            `INSERT INTO users (username, password_hash, display_name, tag) VALUES (?,?,?,?)`
-          )
-          .run(uname, password_hash, dname, tag);
-        userId = info.lastInsertRowid;
-        break;
-      } catch (e) {
-        if (isSqliteUniqueViolation(e)) {
-          if (String(e.message).toLowerCase().includes('users.username'))
-            return res.status(409).json({ error: 'Имя пользователя занято' });
-          if (String(e.message).toLowerCase().includes('users.tag')) continue;
-        }
-        throw e;
+    try {
+      const info = db
+        .prepare(`INSERT INTO users (username, password_hash, display_name, tag) VALUES (?,?,?,?)`)
+        .run(uname, password_hash, dname, tag);
+      userId = info.lastInsertRowid;
+    } catch (e) {
+      if (isSqliteUniqueViolation(e)) {
+        return res.status(409).json({ error: 'Имя пользователя занято' });
       }
+      throw e;
     }
-    if (!userId)
-      return res.status(500).json({ error: 'Не удалось назначить уникальный тег — повторите регистрацию' });
     const token = signToken({ userId });
     const user = db.prepare(`SELECT * FROM users WHERE id = ?`).get(userId);
     res.json({ token, user: rowUser(user) });
@@ -589,6 +589,23 @@ export function createApiRouter(io) {
     }
     const u = db.prepare(`SELECT * FROM users WHERE id = ?`).get(req.userId);
     res.json(rowUser(u));
+  });
+
+  r.post('/me/password', requireAuth, meUserLimit, (req, res) => {
+    const { currentPassword, newPassword } = req.body || {};
+    if (!currentPassword || !newPassword)
+      return res.status(400).json({ error: 'Укажите текущий и новый пароль' });
+    if (String(newPassword).length < 6)
+      return res.status(400).json({ error: 'Новый пароль должен быть не короче 6 символов' });
+    const user = db.prepare(`SELECT * FROM users WHERE id = ?`).get(req.userId);
+    if (!user) return res.status(404).json({ error: 'Пользователь не найден' });
+    if (!verifyPassword(String(currentPassword), user.password_hash))
+      return res.status(403).json({ error: 'Текущий пароль неверный' });
+    db.prepare(`UPDATE users SET password_hash = ? WHERE id = ?`).run(
+      hashPassword(String(newPassword)),
+      req.userId
+    );
+    res.json({ ok: true });
   });
 
   r.get('/users/search', requireAuth, userSearchLimit, (req, res) => {
@@ -681,6 +698,17 @@ export function createApiRouter(io) {
     res.json({ ok: true });
   });
 
+  r.post('/friends/cancel', requireAuth, (req, res) => {
+    const resolved = resolveTargetUserId(req.body || {}, req.userId, { tagKey: 'toTag', userIdKey: 'userId' });
+    if (resolved.error) return res.status(400).json({ error: resolved.error });
+    const toId = resolved.userId;
+    const info = db
+      .prepare(`DELETE FROM friendships WHERE from_user_id = ? AND to_user_id = ? AND status = 'pending'`)
+      .run(req.userId, toId);
+    if (info.changes === 0) return res.status(404).json({ error: 'Заявка не найдена' });
+    res.json({ ok: true });
+  });
+
   r.delete('/friends/:peerId', requireAuth, (req, res) => {
     const peerId = +req.params.peerId;
     db.prepare(
@@ -751,9 +779,6 @@ export function createApiRouter(io) {
       .get(groupId);
     if (!row) return { lastMessagePreview: null, lastMessageAt: null };
     let text = String(row.body || '').trim().replace(/\s+/g, ' ');
-    if (shouldMaskGroupTextForViewer(db, groupId, viewerId, row.sender_id)) {
-      text = maskProfanity(text);
-    }
     if (!text) {
       if (row.att_c > 1) text = `${row.att_c} вложения`;
       else if (row.att_c === 1) text = 'Вложение';
@@ -803,7 +828,6 @@ export function createApiRouter(io) {
           role: g.role,
           createdAt: sqliteUtcToIso(g.created_at) ?? g.created_at,
           forwardLocked: !!g.forward_locked,
-          moderateProfanity: !!g.moderate_profanity,
           invitePolicy: g.invite_policy || 'all',
           joinCode: g.role === 'admin' ? (g.join_code || null) : null,
           lastMessagePreview: lm.lastMessagePreview,
@@ -834,7 +858,6 @@ export function createApiRouter(io) {
       role: chk.role,
       createdAt: sqliteUtcToIso(g.created_at) ?? g.created_at,
       forwardLocked: !!g.forward_locked,
-      moderateProfanity: !!g.moderate_profanity,
       invitePolicy: g.invite_policy || 'all',
       joinCode: chk.role === 'admin' ? (g.join_code || null) : null,
     });
@@ -894,6 +917,8 @@ export function createApiRouter(io) {
     const resolved = resolveTargetUserId(req.body || {}, req.userId, { tagKey: 'tag', userIdKey: 'userId' });
     if (resolved.error) return res.status(400).json({ error: resolved.error });
     const invitee = resolved.userId;
+    if (isGroupBanned(gid, invitee))
+      return res.status(403).json({ error: 'Пользователь забанен в этой группе — сначала разбаньте его' });
     db.prepare(
       `INSERT OR IGNORE INTO group_invites (group_id, inviter_id, invitee_id) VALUES (?,?,?)`
     ).run(gid, req.userId, invitee);
@@ -904,7 +929,9 @@ export function createApiRouter(io) {
   r.get('/groups/invites/incoming', requireAuth, (req, res) => {
     const rows = db
       .prepare(
-        `SELECT gi.*, g.name as group_name FROM group_invites gi
+        `SELECT gi.*, g.name as group_name,
+                CASE WHEN g.password_hash IS NOT NULL THEN 1 ELSE 0 END AS has_password
+         FROM group_invites gi
          JOIN groups g ON g.id = gi.group_id WHERE gi.invitee_id = ?`
       )
       .all(req.userId);
@@ -917,6 +944,8 @@ export function createApiRouter(io) {
       .prepare(`SELECT * FROM group_invites WHERE group_id = ? AND invitee_id = ?`)
       .get(gid, req.userId);
     if (!inv) return res.status(404).json({ error: 'Приглашение не найдено' });
+    if (isGroupBanned(gid, req.userId))
+      return res.status(403).json({ error: 'Вы забанены в этой группе' });
     const g = db.prepare(`SELECT * FROM groups WHERE id = ?`).get(gid);
     if (g.password_hash) {
       const { password } = req.body || {};
@@ -928,6 +957,15 @@ export function createApiRouter(io) {
       `INSERT OR REPLACE INTO group_members (group_id, user_id, role, banned_until) VALUES (?,?, 'member', NULL)`
     ).run(gid, req.userId);
     emitGroupMemberJoinedChatAndSocket(gid, req.userId);
+    res.json({ ok: true });
+  });
+
+  r.post('/groups/:id/invites/decline', requireAuth, (req, res) => {
+    const gid = +req.params.id;
+    const info = db
+      .prepare(`DELETE FROM group_invites WHERE group_id = ? AND invitee_id = ?`)
+      .run(gid, req.userId);
+    if (info.changes === 0) return res.status(404).json({ error: 'Приглашение не найдено' });
     res.json({ ok: true });
   });
 
@@ -949,35 +987,48 @@ export function createApiRouter(io) {
     res.json({ ok: true });
   });
 
+  r.get('/groups/:id/bans', requireAuth, (req, res) => {
+    const gid = +req.params.id;
+    const chk = requireGroupMember(gid, req.userId, 'moderator');
+    if (!chk.ok) return res.status(403).json({ error: chk.error });
+    const rows = db
+      .prepare(
+        `SELECT u.id, u.username, u.display_name, u.tag, u.avatar_file, gb.created_at
+         FROM group_bans gb JOIN users u ON u.id = gb.user_id
+         WHERE gb.group_id = ? ORDER BY gb.created_at DESC`
+      )
+      .all(gid);
+    res.json(
+      rows.map((x) => ({
+        ...rowUser(x),
+        bannedAt: sqliteUtcToIso(x.created_at) ?? x.created_at,
+      }))
+    );
+  });
+
   r.post('/groups/:id/ban', requireAuth, (req, res) => {
     const gid = +req.params.id;
-    const { userId: target, until } = req.body || {};
+    const { userId: target } = req.body || {};
     const tid = +target;
     if (!Number.isFinite(tid) || tid <= 0) return res.status(400).json({ error: 'Некорректный userId' });
     const chk = requireGroupMember(gid, req.userId, 'moderator');
     if (!chk.ok) return res.status(403).json({ error: chk.error });
+    if (tid === req.userId) return res.status(400).json({ error: 'Нельзя забанить самого себя' });
     const tmem = getMembership(gid, tid);
-    if (!tmem) return res.status(404).json({ error: 'Пользователь не в группе' });
-    if (tmem.role === 'admin') return res.status(403).json({ error: 'Нельзя забанить администратора' });
-    // Валидируем срок: допустимая ISO-дата в будущем, не более 100 лет.
-    const MAX_MS = Date.now() + 100 * 365 * 24 * 3600 * 1000;
-    let banUntilMs;
-    if (until != null && String(until).trim() !== '') {
-      const parsed = Date.parse(String(until));
-      if (!Number.isFinite(parsed)) return res.status(400).json({ error: 'Некорректная дата until' });
-      if (parsed <= Date.now()) return res.status(400).json({ error: 'Срок должен быть в будущем' });
-      banUntilMs = Math.min(parsed, MAX_MS);
-    } else {
-      banUntilMs = MAX_MS;
-    }
-    const banUntil = new Date(banUntilMs).toISOString();
-    db.prepare(`UPDATE group_members SET banned_until = ? WHERE group_id = ? AND user_id = ?`).run(
-      banUntil,
-      gid,
-      tid
-    );
+    if (tmem && tmem.role === 'admin') return res.status(403).json({ error: 'Нельзя забанить администратора' });
+    // Бан = постоянное исключение: записываем в group_bans, удаляем из участников,
+    // снимаем возможные приглашения. Разбанить можно из списка забаненных.
+    const tx = db.transaction(() => {
+      db.prepare(
+        `INSERT OR REPLACE INTO group_bans (group_id, user_id, banned_by) VALUES (?,?,?)`
+      ).run(gid, tid, req.userId);
+      db.prepare(`DELETE FROM group_members WHERE group_id = ? AND user_id = ?`).run(gid, tid);
+      db.prepare(`DELETE FROM group_invites WHERE group_id = ? AND invitee_id = ?`).run(gid, tid);
+    });
+    tx();
     emitToUser(tid, 'group:banned', { groupId: gid });
-    writeAudit(db, req.userId, 'group_ban', 'group', gid, { targetUserId: tid, until: banUntil });
+    io.to(`group:${gid}`).emit('group:memberLeft', { groupId: gid, userId: tid });
+    writeAudit(db, req.userId, 'group_ban', 'group', gid, { targetUserId: tid });
     res.json({ ok: true });
   });
 
@@ -988,12 +1039,11 @@ export function createApiRouter(io) {
     if (!Number.isFinite(tid) || tid <= 0) return res.status(400).json({ error: 'Некорректный userId' });
     const chk = requireGroupMember(gid, req.userId, 'moderator');
     if (!chk.ok) return res.status(403).json({ error: chk.error });
-    const tmem = getMembership(gid, tid);
-    if (!tmem) return res.status(404).json({ error: 'Пользователь не в группе' });
-    db.prepare(`UPDATE group_members SET banned_until = NULL WHERE group_id = ? AND user_id = ?`).run(
-      gid,
-      tid
-    );
+    const info = db.prepare(`DELETE FROM group_bans WHERE group_id = ? AND user_id = ?`).run(gid, tid);
+    // На случай старых банов через banned_until (до перехода на group_bans).
+    db.prepare(`UPDATE group_members SET banned_until = NULL WHERE group_id = ? AND user_id = ?`).run(gid, tid);
+    if (info.changes === 0) return res.status(404).json({ error: 'Пользователь не забанен' });
+    emitToUser(tid, 'group:unbanned', { groupId: gid });
     writeAudit(db, req.userId, 'group_unban', 'group', gid, { targetUserId: tid });
     res.json({ ok: true });
   });
@@ -1033,7 +1083,6 @@ export function createApiRouter(io) {
       clearPassword,
       joinCode,
       forwardLocked,
-      moderateProfanity,
       invitePolicy,
     } = req.body || {};
     const g = db.prepare(`SELECT * FROM groups WHERE id = ?`).get(gid);
@@ -1063,18 +1112,15 @@ export function createApiRouter(io) {
 
     const forward_locked =
       forwardLocked !== undefined ? (forwardLocked ? 1 : 0) : g.forward_locked ?? 0;
-    const moderate_profanity =
-      moderateProfanity !== undefined ? (moderateProfanity ? 1 : 0) : g.moderate_profanity ?? 0;
 
     try {
       db.prepare(
-        `UPDATE groups SET name = COALESCE(?, name), password_hash = ?, join_code = ?, forward_locked = ?, moderate_profanity = ?, invite_policy = ? WHERE id = ?`
+        `UPDATE groups SET name = COALESCE(?, name), password_hash = ?, join_code = ?, forward_locked = ?, invite_policy = ? WHERE id = ?`
       ).run(
         name != null ? String(name).trim() : null,
         password_hash,
         join_code,
         forward_locked,
-        moderate_profanity,
         invite_policy,
         gid
       );
@@ -1087,13 +1133,11 @@ export function createApiRouter(io) {
     io.to(`group:${gid}`).emit('group:settings', {
       groupId: gid,
       forwardLocked: !!g2.forward_locked,
-      moderateProfanity: !!g2.moderate_profanity,
       invitePolicy: g2.invite_policy || 'all',
     });
     writeAudit(db, req.userId, 'group_settings', 'group', gid, {
       name: name != null ? String(name).trim() : undefined,
       forwardLocked: forwardLocked !== undefined ? !!forwardLocked : undefined,
-      moderateProfanity: moderateProfanity !== undefined ? !!moderateProfanity : undefined,
       invitePolicy: invitePolicy !== undefined ? invite_policy : undefined,
       joinCodeChanged: joinCode !== undefined,
       passwordChanged: !!(password || clearPassword),
@@ -1165,13 +1209,27 @@ export function createApiRouter(io) {
     params.push(limit);
     const rows = db.prepare(sql).all(...params);
     res.json(
-      rows.map((row) => ({
-        id: row.id,
-        createdAt: sqliteUtcToIso(row.created_at) ?? row.created_at,
-        actor: rowUser(db.prepare(`SELECT * FROM users WHERE id = ?`).get(row.actor_user_id)),
-        action: row.action,
-        meta: row.meta_json ? JSON.parse(row.meta_json) : null,
-      }))
+      rows.map((row) => {
+        const meta = row.meta_json ? JSON.parse(row.meta_json) : null;
+        // Разворачиваем targetUserId в отображаемое имя, чтобы клиент показывал
+        // «Иван Иванов», а не «Пользователь #3».
+        if (meta && typeof meta.targetUserId === 'number') {
+          const tu = db
+            .prepare(`SELECT display_name, username, tag FROM users WHERE id = ?`)
+            .get(meta.targetUserId);
+          if (tu) {
+            meta.targetUserName = tu.display_name || tu.username || `#${meta.targetUserId}`;
+            meta.targetUserTag = tu.tag ?? null;
+          }
+        }
+        return {
+          id: row.id,
+          createdAt: sqliteUtcToIso(row.created_at) ?? row.created_at,
+          actor: rowUser(db.prepare(`SELECT * FROM users WHERE id = ?`).get(row.actor_user_id)),
+          action: row.action,
+          meta,
+        };
+      })
     );
   });
 
@@ -1737,9 +1795,6 @@ export function createApiRouter(io) {
       .prepare(`SELECT COUNT(*) as c FROM message_attachments WHERE message_id = ?`)
       .get(replyToId).c;
     let bodyText = String(parent.body || '');
-    if (shouldMaskGroupTextForViewer(db, parent.group_id, viewerUserId, parent.sender_id)) {
-      bodyText = maskProfanity(bodyText);
-    }
     let preview = bodyText
       .trim()
       .replace(/\s+/g, ' ')
@@ -1789,11 +1844,7 @@ export function createApiRouter(io) {
     if (!Array.isArray(arr) || !arr.length) return null;
     return arr.map((e) => ({
       sender: e.sender,
-      bodyPreview:
-        shouldMaskGroupTextForViewer(db, msgRow.group_id, viewerUserId, e.sender?.id ?? null) &&
-        e.bodyPreview != null
-          ? maskProfanity(String(e.bodyPreview))
-          : String(e.bodyPreview ?? ''),
+      bodyPreview: String(e.bodyPreview ?? ''),
       hasAttachments: !!e.hasAttachments,
     }));
   }
@@ -1840,20 +1891,20 @@ export function createApiRouter(io) {
         )
         .all(msg.group_id, viewerUserId);
       if (others.length === 0) return { read: true, readAt: null };
-      let read = true;
+      // Достаточно одного прочитавшего: сообщение считается прочитанным.
+      // Время — самое позднее среди прочитавших.
+      let anyRead = false;
       let latestAt = null;
       for (const { user_id: uid } of others) {
         const cur = effectiveReadCursor(uid, 'group', msg.group_id);
-        if (cur < msg.id) {
-          read = false;
-          break;
-        }
+        if (cur < msg.id) continue;
+        anyRead = true;
         const row = db
           .prepare(`SELECT read_at FROM message_read_receipts WHERE message_id = ? AND user_id = ?`)
           .get(msg.id, uid);
         if (row?.read_at && (!latestAt || row.read_at > latestAt)) latestAt = row.read_at;
       }
-      return { read, readAt: read ? latestAt : null };
+      return { read: anyRead, readAt: anyRead ? latestAt : null };
     }
     return undefined;
   }
@@ -1901,9 +1952,7 @@ export function createApiRouter(io) {
       !!db
         .prepare(`SELECT 1 FROM user_message_important WHERE user_id = ? AND message_id = ?`)
         .get(viewerUserId, msg.id);
-    const modBody = shouldMaskGroupTextForViewer(db, msg.group_id, viewerUserId, msg.sender_id);
-    let bodyOut = msg.body;
-    if (modBody) bodyOut = maskProfanity(String(msg.body || ''));
+    const bodyOut = msg.body;
     const chatEvent = msg.group_id ? groupMemberChatEventKind(msg.body) : null;
     return {
       id: msg.id,
@@ -1926,8 +1975,7 @@ export function createApiRouter(io) {
         fileName: normalizePossibleMultipartFilename(a.file_name) || a.file_name,
         mimeType: a.mime_type,
         kind: a.kind,
-        transcript:
-          a.transcript && modBody ? maskProfanity(String(a.transcript)) : a.transcript || null,
+        transcript: a.transcript || null,
       })),
       mentionUserIds: mentions,
       outboundRead: outboundReadReceipt(msg, viewerUserId),
@@ -1943,17 +1991,7 @@ export function createApiRouter(io) {
   }
 
   function emitGroupMessageEvent(event, groupId, msg) {
-    const gRow = db.prepare(`SELECT moderate_profanity FROM groups WHERE id = ?`).get(groupId);
-    if (!gRow?.moderate_profanity) {
-      io.to(`group:${groupId}`).emit(event, buildMessagePayload(msg));
-      return;
-    }
-    void io.in(`group:${groupId}`).fetchSockets().then((socks) => {
-      for (const s of socks) {
-        const uid = s.userId;
-        s.emit(event, buildMessagePayload(msg, uid != null ? uid : undefined));
-      }
-    });
+    io.to(`group:${groupId}`).emit(event, buildMessagePayload(msg));
   }
 
   function emitGroupMemberJoinedChatAndSocket(gid, userId) {
@@ -2055,6 +2093,65 @@ export function createApiRouter(io) {
       rootId,
       messages: rows.map((row) => buildMessagePayload(row, req.userId)),
     });
+  });
+
+  /**
+   * Кто прочитал сообщение и когда. Доступно только автору сообщения (галочки «✓✓» видит отправитель).
+   * Для лички — собеседник (если прочитал); для группы — все участники (кроме автора), чей курсор дошёл до сообщения.
+   */
+  r.get('/messages/:id/read-receipts', requireAuth, (req, res) => {
+    const mid = +req.params.id;
+    if (!Number.isFinite(mid) || mid <= 0) return res.status(400).json({ error: 'Некорректный id' });
+    const msg = db.prepare(`SELECT * FROM messages WHERE id = ?`).get(mid);
+    if (!msg) return res.status(404).json({ error: 'Сообщение не найдено' });
+    if (msg.sender_id !== req.userId) return res.status(403).json({ error: 'Нет доступа' });
+
+    const readerRow = (uid) => {
+      const u = db.prepare(`SELECT * FROM users WHERE id = ?`).get(uid);
+      if (!u) return null;
+      const receipt = db
+        .prepare(`SELECT read_at FROM message_read_receipts WHERE message_id = ? AND user_id = ?`)
+        .get(mid, uid);
+      const pref = db
+        .prepare(
+          `SELECT last_read_at FROM user_chat_prefs WHERE user_id = ? AND chat_kind = ? AND chat_id = ?`
+        )
+        .get(uid, msg.group_id != null ? 'group' : 'direct', msg.group_id ?? msg.direct_id);
+      const at = receipt?.read_at ?? pref?.last_read_at ?? null;
+      const ru = rowUser(u);
+      return { id: ru.id, displayName: ru.displayName, tag: ru.tag, avatarUrl: ru.avatarUrl, readAt: sqliteUtcToIso(at) ?? at };
+    };
+
+    if (msg.direct_id != null) {
+      const d = db.prepare(`SELECT * FROM direct_conversations WHERE id = ?`).get(msg.direct_id);
+      if (!d) return res.status(404).json({ error: 'Диалог не найден' });
+      const peerId = d.user_low_id === req.userId ? d.user_high_id : d.user_low_id;
+      const cur = effectiveReadCursor(peerId, 'direct', msg.direct_id);
+      const readers = cur >= msg.id ? [readerRow(peerId)].filter(Boolean) : [];
+      return res.json({ kind: 'direct', readers });
+    }
+    if (msg.group_id != null) {
+      const chk = requireGroupMember(msg.group_id, req.userId);
+      if (!chk.ok) return res.status(403).json({ error: chk.error });
+      const mems = db
+        .prepare(
+          `SELECT user_id FROM group_members gm
+           WHERE gm.group_id = ? AND gm.user_id != ?
+           AND (gm.banned_until IS NULL OR datetime(gm.banned_until) <= datetime('now'))`
+        )
+        .all(msg.group_id, req.userId);
+      const readers = [];
+      for (const { user_id: uid } of mems) {
+        const cur = effectiveReadCursor(uid, 'group', msg.group_id);
+        if (cur >= msg.id) {
+          const row = readerRow(uid);
+          if (row) readers.push(row);
+        }
+      }
+      readers.sort((a, b) => String(a.readAt || '').localeCompare(String(b.readAt || '')));
+      return res.json({ kind: 'group', readers });
+    }
+    return res.status(400).json({ error: '?' });
   });
 
   r.get('/messages/:id/context', requireAuth, (req, res) => {
@@ -2380,35 +2477,6 @@ export function createApiRouter(io) {
     if (msg.group_id) emitGroupMessageEvent('message:pinned', msg.group_id, m2);
     else io.to(`direct:${msg.direct_id}`).emit('message:pinned', buildMessagePayload(m2));
     res.json(buildMessagePayload(m2, req.userId));
-  });
-
-  r.post('/messages/delete-batch', requireAuth, (req, res) => {
-    const raw = req.body?.ids;
-    if (!Array.isArray(raw) || raw.length === 0)
-      return res.status(400).json({ error: 'Укажите ids' });
-    const ids = [...new Set(raw.map((x) => +x))].filter((n) => Number.isFinite(n) && n > 0);
-    if (ids.length > 200) return res.status(400).json({ error: 'Слишком много сообщений' });
-    const deletedIds = [];
-    for (const mid of ids) {
-      const msg = db.prepare(`SELECT * FROM messages WHERE id = ?`).get(mid);
-      if (!msg) continue;
-      if (msg.group_id) {
-        const chk = requireGroupMember(msg.group_id, req.userId);
-        if (!chk.ok) continue;
-        const isMod = requireGroupMember(msg.group_id, req.userId, 'moderator').ok;
-        if (!isMod && msg.sender_id !== req.userId) continue;
-      } else if (msg.direct_id) {
-        const d = db.prepare(`SELECT * FROM direct_conversations WHERE id = ?`).get(msg.direct_id);
-        if (!d || (d.user_low_id !== req.userId && d.user_high_id !== req.userId)) continue;
-        if (msg.sender_id !== req.userId) continue;
-      } else continue;
-      deleteMessageWithAttachmentCleanup(mid);
-      deletedIds.push(mid);
-      const payload = { id: mid, groupId: msg.group_id, directId: msg.direct_id };
-      if (msg.group_id) io.to(`group:${msg.group_id}`).emit('message:deleted', payload);
-      else io.to(`direct:${msg.direct_id}`).emit('message:deleted', payload);
-    }
-    res.json({ ok: true, deletedIds });
   });
 
   r.post('/messages/forward-batch', requireAuth, forwardUserLimit, (req, res) => {
@@ -2792,6 +2860,7 @@ export function createApiRouter(io) {
 
   appendWorkspaceRoutes(r, io);
   appendOnlyOfficeRoutes(r, io);
+  appendAnnouncementRoutes(r, io);
 
   return r;
 }

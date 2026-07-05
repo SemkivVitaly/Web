@@ -26,6 +26,7 @@ import {
   applySnapshot,
   type SheetSnapshot,
 } from './sheetModel';
+import { uiConfirm } from '../ui/dialogs';
 
 // --- Подписи колонок A, B, … и проверка попадания ячейки в выделение ---
 
@@ -301,8 +302,8 @@ export function CollabSheet({ ydoc, docName = 'таблица' }: { ydoc: Y.Doc;
               type="button"
               className="lc-excel-mini danger"
               title="Удалить строку"
-              onClick={() => {
-                if (!confirm(`Удалить строку ${r + 1}?`)) return;
+              onClick={async () => {
+                if (!(await uiConfirm(`Удалить строку ${r + 1}?`, { title: 'Удаление строки', danger: true, okText: 'Удалить' }))) return;
                 deleteRow(ydoc, r);
                 bump();
               }}
@@ -343,8 +344,8 @@ export function CollabSheet({ ydoc, docName = 'таблица' }: { ydoc: Y.Doc;
                 insertRow(ydoc, focus.r);
                 bump();
               }, 'Вставить строку выше текущей')}
-              {tbBtn('Удалить строку', () => {
-                if (confirm(`Удалить строку ${focus.r + 1}?`)) {
+              {tbBtn('Удалить строку', async () => {
+                if (await uiConfirm(`Удалить строку ${focus.r + 1}?`, { title: 'Удаление строки', danger: true, okText: 'Удалить' })) {
                   deleteRow(ydoc, focus.r);
                   bump();
                 }
@@ -361,8 +362,8 @@ export function CollabSheet({ ydoc, docName = 'таблица' }: { ydoc: Y.Doc;
                 insertCol(ydoc, focus.c);
                 bump();
               }, 'Вставить столбец слева')}
-              {tbBtn('Удалить столбец', () => {
-                if (confirm(`Удалить столбец ${colLabel(focus.c)}?`)) {
+              {tbBtn('Удалить столбец', async () => {
+                if (await uiConfirm(`Удалить столбец ${colLabel(focus.c)}?`, { title: 'Удаление столбца', danger: true, okText: 'Удалить' })) {
                   deleteCol(ydoc, focus.c);
                   bump();
                 }
@@ -495,8 +496,8 @@ export function CollabSheet({ ydoc, docName = 'таблица' }: { ydoc: Y.Doc;
                       type="button"
                       className="lc-excel-mini danger"
                       title="Удалить столбец"
-                      onClick={() => {
-                        if (!confirm(`Удалить столбец ${colLabel(c)}?`)) return;
+                      onClick={async () => {
+                        if (!(await uiConfirm(`Удалить столбец ${colLabel(c)}?`, { title: 'Удаление столбца', danger: true, okText: 'Удалить' }))) return;
                         deleteCol(ydoc, c);
                         bump();
                       }}

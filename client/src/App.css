@@ -546,8 +546,16 @@ a {
   gap: 4px;
   flex: 1;
   min-height: 0;
+  min-width: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding-bottom: 0.15rem;
+}
+
+/* Строки-обёртки списка чатов (кнопка + ручка перетаскивания) должны сжиматься,
+   иначе длинный превью/название вылезает за пределы сайдбара. */
+.lc-chat-tab-panel > div {
+  min-width: 0;
 }
 
 .lc-chat-section {
@@ -589,6 +597,8 @@ a {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .chat-item:hover {
@@ -627,6 +637,10 @@ a {
 .lc-chat-messenger-header {
   flex-wrap: wrap;
   align-items: center;
+  /* Свой контекст наложения выше панели сообщений: иначе выпадающее меню «⋯»
+     визуально видно, но клики перехватывает прозрачный .messages (см. .lc-messages-pane). */
+  position: relative;
+  z-index: 30;
 }
 
 .lc-chat-messenger-avatar {
@@ -1157,10 +1171,144 @@ a {
 }
 
 .lc-msg-read-wrap {
+  position: relative;
   display: inline-flex;
   align-items: center;
   line-height: 1;
   cursor: default;
+}
+
+/* Поповер со списком прочитавших при наведении на ✓✓ */
+.lc-msg-receipts-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 12rem;
+  max-width: 18rem;
+  padding: 0.5rem 0.6rem;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  cursor: default;
+  text-align: left;
+}
+
+.lc-msg-receipts-pop-title {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 0.15rem;
+}
+
+.lc-msg-receipts-empty {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.lc-msg-receipts-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  font-size: 0.82rem;
+}
+
+.lc-msg-receipts-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.lc-msg-receipts-time {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.lc-msg-receipts-showall {
+  margin-top: 0.3rem;
+  padding: 0.3rem 0.4rem;
+  font-size: 0.8rem;
+  border: none;
+  border-radius: 6px;
+  background: rgba(91, 140, 255, 0.12);
+  color: var(--accent);
+  cursor: pointer;
+  text-align: center;
+}
+
+.lc-msg-receipts-showall:hover {
+  background: rgba(91, 140, 255, 0.2);
+}
+
+/* Модалка «Прочитано»: полный список пользователей + время */
+.lc-read-receipts-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.lc-read-receipts-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.45rem 0.35rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.lc-read-receipts-item:last-child {
+  border-bottom: none;
+}
+
+.lc-read-receipts-user {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+}
+
+.lc-read-receipts-avatar {
+  flex-shrink: 0;
+  width: 1.9rem;
+  height: 1.9rem;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.lc-read-receipts-avatar--fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.lc-read-receipts-name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.lc-read-receipts-time {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .lc-msg-ticks {
@@ -2607,6 +2755,56 @@ label:has(input[type='radio']) {
   color: #141820;
 }
 
+.lc-invites-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.lc-invites-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.lc-invite-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.lc-invite-name {
+  font-weight: 600;
+}
+
+.lc-invite-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.lc-invites-badge {
+  flex-shrink: 0;
+  min-width: 1.25rem;
+  height: 1.25rem;
+  padding: 0 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.25rem;
+  text-align: center;
+  border-radius: 999px;
+  background: #e5484d;
+  color: #fff;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -2637,6 +2835,16 @@ label:has(input[type='radio']) {
   list-style: none;
   padding: 0;
   margin: 0.5rem 0 0;
+}
+
+.lc-group-banned-section {
+  margin-top: 1.25rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.lc-group-banned-section h4 {
+  margin: 0;
 }
 
 .lc-group-mod-members > li {
@@ -4358,6 +4566,28 @@ video {
   margin-bottom: 1.25rem;
 }
 
+/* Доска задач на весь экран: фиксированный слой поверх всего интерфейса. */
+.lc-task-canvas-wrap--fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  margin: 0;
+  padding: 0.75rem;
+  background: var(--bg);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.lc-task-canvas-wrap--fullscreen .lc-task-canvas-layout {
+  flex: 1;
+  min-height: 0;
+}
+
+.lc-task-canvas-wrap--fullscreen .lc-solution-explorer {
+  max-height: none;
+}
+
 .lc-task-canvas-layout {
   display: grid;
   grid-template-columns: minmax(200px, 280px) 1fr;
@@ -4617,6 +4847,18 @@ video {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg);
+  cursor: grab;
+}
+
+.lc-canvas-viewport--panning {
+  cursor: grabbing;
+  user-select: none;
+}
+
+/* В полноэкранном режиме доска занимает всю доступную высоту. */
+.lc-task-canvas-wrap--fullscreen .lc-canvas-viewport {
+  max-height: none;
+  flex: 1;
 }
 
 .lc-canvas-transform-layer {
@@ -5285,6 +5527,26 @@ video {
     line-height: 1;
   }
 
+  .lc-mobile-nav-icon--badged {
+    position: relative;
+  }
+
+  .lc-mobile-nav-badge {
+    position: absolute;
+    top: -0.35rem;
+    left: 60%;
+    min-width: 1rem;
+    height: 1rem;
+    padding: 0 0.25rem;
+    font-size: 0.6rem;
+    font-weight: 700;
+    line-height: 1rem;
+    text-align: center;
+    border-radius: 999px;
+    background: #e5484d;
+    color: #fff;
+  }
+
   .lc-mobile-nav-label {
     white-space: nowrap;
     overflow: hidden;
@@ -5809,5 +6071,282 @@ a:hover {
 .lc-chat-fav-star:hover,
 .lc-chat-tab-dnd-handle:hover {
   transform: none;
+}
+
+/* =========================================================================
+ * Объявления группы с подтверждением ознакомления
+ * ========================================================================= */
+.lc-announcement-ack-backdrop {
+  z-index: 50;
+}
+
+.lc-announcement-ack-modal {
+  max-width: 560px;
+}
+
+.lc-announcement-ack-queue {
+  margin: 0 0 0.75rem;
+}
+
+.lc-announcement-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.85rem 1rem;
+  margin-bottom: 1rem;
+  background: var(--surface-2, rgba(0, 0, 0, 0.03));
+}
+
+.lc-announcement-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.75rem;
+  align-items: baseline;
+  margin-bottom: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.lc-announcement-card-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.45;
+}
+
+.lc-announcement-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.65rem;
+}
+
+.lc-announcement-attachment .attach {
+  max-width: 100%;
+  border-radius: 8px;
+}
+
+.lc-announcement-comment-box label {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-size: 0.9rem;
+}
+
+.lc-announcement-comment-box textarea {
+  width: 100%;
+  min-height: 4.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.lc-announcement-ack-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.lc-announcements-modal {
+  max-width: min(960px, 96vw);
+}
+
+.lc-announcement-create {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.lc-announcement-create textarea {
+  width: 100%;
+  min-height: 4.5rem;
+}
+
+.lc-announcements-layout {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+@media (max-width: 720px) {
+  .lc-announcements-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.lc-announcements-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.lc-announcements-list button {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.55rem 0.65rem;
+}
+
+.lc-announcements-list-title {
+  font-size: 0.9rem;
+  line-height: 1.35;
+}
+
+.lc-announcements-detail {
+  min-width: 0;
+}
+
+.lc-announcement-stats-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.75rem 0;
+}
+
+.lc-announcement-status-pill {
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.lc-announcement-status-pill--ack {
+  background: rgba(46, 160, 67, 0.15);
+  color: #1a7f37;
+}
+
+.lc-announcement-status-pill--need {
+  background: rgba(210, 153, 34, 0.18);
+  color: #9a6700;
+}
+
+.lc-announcement-status-pill--pending {
+  background: rgba(120, 120, 128, 0.15);
+  color: var(--muted);
+}
+
+.lc-announcement-stats-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.lc-announcement-stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.lc-announcement-stats-table th,
+.lc-announcement-stats-table td {
+  padding: 0.5rem 0.65rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.lc-announcement-stats-table th {
+  background: var(--surface-2, rgba(0, 0, 0, 0.03));
+  font-weight: 600;
+}
+
+.lc-announcement-stats-table tr:last-child td {
+  border-bottom: none;
+}
+
+/* =========================================================================
+ * Внутренние диалоги (замена браузерных alert/confirm/prompt)
+ * ========================================================================= */
+.lc-dialog-backdrop {
+  z-index: 80;
+}
+
+.lc-dialog {
+  max-width: 420px;
+}
+
+.lc-dialog-message {
+  margin: 0 0 0.9rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.lc-dialog-input {
+  width: 100%;
+  margin-bottom: 1rem;
+}
+
+.lc-dialog-actions {
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+/* =========================================================================
+ * Журнал аудита: человекочитаемые записи
+ * ========================================================================= */
+.lc-audit-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.lc-audit-action {
+  font-weight: 600;
+  font-size: 0.92rem;
+}
+
+.lc-audit-when {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.lc-audit-actor {
+  margin-top: 0.1rem;
+  font-size: 0.8rem;
+}
+
+.lc-audit-detail {
+  margin-top: 0.2rem;
+  font-size: 0.85rem;
+  color: var(--text);
+  word-break: break-word;
+}
+
+/* =========================================================================
+ * Внутренние диалоги (замена нативных alert/confirm/prompt)
+ * ========================================================================= */
+.lc-dialog-backdrop {
+  z-index: 70;
+}
+
+.lc-dialog-modal {
+  max-width: 440px;
+}
+
+.lc-dialog-title {
+  margin: 0 0 0.5rem;
+}
+
+.lc-dialog-message {
+  margin: 0 0 0.75rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.lc-dialog-input {
+  width: 100%;
+  margin-bottom: 0.9rem;
+  box-sizing: border-box;
+}
+
+.lc-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 

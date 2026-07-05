@@ -26,6 +26,7 @@ import {
 import { flushSync } from 'react-dom';
 import { io, Socket } from 'socket.io-client';
 import { api, apiForm, apiFormWithProgress, getToken, getApiOrigin, resolveUrl } from './api';
+import { uiConfirm, uiPrompt } from './ui/dialogs';
 import type {
   User,
   Message,
@@ -39,6 +40,11 @@ import type {
   InvitePolicy,
 } from './types';
 import { normalizeLoadedMessage } from './chat/messageNormalize';
+import {
+  AnnouncementAckModal,
+  GroupAnnouncementsModal,
+  type GroupAnnouncement,
+} from './chat/AnnouncementModals';
 import {
   readCollabUnlock,
   rememberDocUnlock,
@@ -72,7 +78,9 @@ import {
   CHAT_TIMEZONE,
   isoToMoscowYmd,
   formatMessageClock,
+  formatReceiptWhen,
   MsgReadTicks,
+  type MessageReader,
   groupMemberChatEventKind,
   buildChatTimeline,
   directOwnMessageRead,
@@ -362,6 +370,10 @@ export default function ChatApp({
   const [threadLoading, setThreadLoading] = useState(false);
   const [chatOnlineOtherIds, setChatOnlineOtherIds] = useState<number[]>([]);
   const [typingPeerNames, setTypingPeerNames] = useState<string[]>([]);
+  const [pendingAnnouncements, setPendingAnnouncements] = useState<GroupAnnouncement[]>([]);
+  const [announcementAckOpen, setAnnouncementAckOpen] = useState(false);
+  const [announcementStatsRefreshKey, setAnnouncementStatsRefreshKey] = useState(0);
+  const [readReceiptsModal, setReadReceiptsModal] = useState<MessageReader[] | null>(null);
   const typingPeersRef = useRef<Map<number, string>>(new Map());
   const typingClearTimersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
   const textRef = useRef(text);
@@ -373,6 +385,7 @@ export default function ChatApp({
   const [friendIds, setFriendIds] = useState<Record<number, true>>({});
   const [pendingFriendIn, setPendingFriendIn] = useState<Record<number, true>>({});
   const [pendingFriendOut, setPendingFriendOut] = useState<Record<number, true>>({});
+  const [inviteCount, setInviteCount] = useState(0);
   const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const longPressStartRef = useRef<{ x: number; y: number } | null>(null);
 
@@ -558,6 +571,15 @@ export default function ChatApp({
     }
   }, []);
 
+  const refreshInvites = useCallback(async () => {
+    try {
+      const rows = await api<{ id: number }[]>('/api/groups/invites/incoming');
+      setInviteCount(Array.isArray(rows) ? rows.length : 0);
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   const refreshGroupMembersAndLists = useCallback(async () => {
     await refreshLists();
     if (active?.kind === 'group') {
@@ -623,6 +645,12 @@ export default function ChatApp({
   useEffect(() => {
     void refreshFriendState().catch(() => {});
   }, [refreshFriendState]);
+
+  useEffect(() => {
+    void refreshInvites().catch(() => {});
+  }, [refreshInvites]);
+
+  const friendRequestCount = Object.keys(pendingFriendIn).length;
 
   useEffect(() => {
     const key = active ? `${active.kind}:${active.id}` : '';
@@ -880,6 +908,36 @@ export default function ChatApp({
     }
   }, [messageMenuOpen, messageMenuOpenAbove]);
 
+  useLayoutEffect(() => {
+    const el = messageMenuRef.current;
+    if (!el) return;
+    if (messageMenuOpen == null) {
+      el.style.transform = '';
+      return;
+    }
+    const margin = MESSAGE_MENU_VIEWPORT_MARGIN;
+    el.style.transform = '';
+    const r = el.getBoundingClientRect();
+    // Границы — область ленты сообщений (уже, чем окно), с запасом. Иначе меню у левых
+    // сообщений вылезает за пределы чата.
+    const pane =
+      (el.closest('.lc-messages-pane') as HTMLElement | null) ||
+      (el.closest('.messages') as HTMLElement | null);
+    const paneRect = pane?.getBoundingClientRect();
+    const leftBound = Math.max(margin, (paneRect?.left ?? 0) + margin);
+    const rightBound = Math.min(
+      window.innerWidth - margin,
+      (paneRect?.right ?? window.innerWidth) - margin
+    );
+    let shift = 0;
+    if (r.left < leftBound) {
+      shift = leftBound - r.left;
+    } else if (r.right > rightBound) {
+      shift = rightBound - r.right;
+    }
+    el.style.transform = shift !== 0 ? `translateX(${Math.round(shift)}px)` : '';
+  }, [messageMenuOpen, messageMenuOpenAbove]);
+
   useEffect(() => {
     if (messageMenuOpen == null) return;
     const remeasure = () => {
@@ -887,6 +945,7 @@ export default function ChatApp({
       if (!el) return;
       el.style.maxHeight = '';
       el.style.overflowY = '';
+      el.style.transform = '';
       flushSync(() => setMessageMenuOpenAbove(false));
       const r = el.getBoundingClientRect();
       setMessageMenuOpenAbove(r.bottom > window.innerHeight - MESSAGE_MENU_VIEWPORT_MARGIN);
@@ -1094,11 +1153,11 @@ export default function ChatApp({
             if (!ok) {
               if (needFolder) {
                 const label = (meta.folderName && meta.folderName.trim()) || 'папки';
-                folderPassword = prompt(`Пароль папки «${label}»`) || '';
+                folderPassword = (await uiPrompt(`Пароль папки «${label}»`, { title: 'Требуется пароль' })) || '';
                 if (!folderPassword.trim()) return;
               }
               if (needDoc) {
-                docPassword = prompt(`Пароль документа «${meta.name}»`) || '';
+                docPassword = (await uiPrompt(`Пароль документа «${meta.name}»`, { title: 'Требуется пароль' })) || '';
                 if (!docPassword.trim()) return;
               }
               if (!(await tryVerify())) {
@@ -1179,7 +1238,7 @@ export default function ChatApp({
             }
           }
           if (!verified) {
-            pw = prompt(`Пароль доски «${meta.boardName}»`) || '';
+            pw = (await uiPrompt(`Пароль доски «${meta.boardName}»`, { title: 'Требуется пароль' })) || '';
             if (!pw.trim()) return;
             try {
               await api(`/api/task-boards/${meta.boardId}/verify-password`, {
@@ -1662,13 +1721,13 @@ export default function ChatApp({
     s.on('group:invite', () => {
       showToast('Приглашение в группу');
       refreshLists();
+      void refreshInvites();
     });
     s.on(
       'group:settings',
       (p: {
         groupId: number;
         forwardLocked: boolean;
-        moderateProfanity: boolean;
         invitePolicy: InvitePolicy;
       }) => {
         setGroups((prev) =>
@@ -1677,7 +1736,6 @@ export default function ChatApp({
               ? {
                   ...g,
                   forwardLocked: p.forwardLocked,
-                  moderateProfanity: p.moderateProfanity,
                   invitePolicy: p.invitePolicy,
                 }
               : g
@@ -1714,6 +1772,18 @@ export default function ChatApp({
       if (cur?.kind === 'group' && cur.id === p.groupId) {
         setMembers((prev) => prev.filter((u) => u.id !== p.userId));
       }
+    });
+    // Меня забанили/исключили из группы: убираем группу из списка (эффект сам закроет активный чат).
+    s.on('group:banned', () => {
+      showToast('Вас забанили в группе');
+      void refreshLists();
+    });
+    s.on('group:kicked', () => {
+      showToast('Вас исключили из группы');
+      void refreshLists();
+    });
+    s.on('group:unbanned', () => {
+      void refreshLists();
     });
     s.on(
       'group:memberJoined',
@@ -1815,7 +1885,7 @@ export default function ChatApp({
       socketRef.current = null;
       setIoSocket(null);
     };
-  }, [refreshLists, refreshFriendState, showToast, reloadActiveMessages, patchMessageWorkspaceLinks]);
+  }, [refreshLists, refreshFriendState, refreshInvites, showToast, reloadActiveMessages, patchMessageWorkspaceLinks]);
 
   useEffect(() => {
     const s = socketRef.current;
@@ -1858,7 +1928,26 @@ export default function ChatApp({
         } catch {
           if (!cancelled) setMembers([]);
         }
-      } else setMembers([]);
+        try {
+          const pending = await api<GroupAnnouncement[]>(
+            `/api/groups/${active.id}/announcements/pending`
+          );
+          if (!cancelled) {
+            const list = Array.isArray(pending) ? pending : [];
+            setPendingAnnouncements(list);
+            setAnnouncementAckOpen(list.length > 0);
+          }
+        } catch {
+          if (!cancelled) {
+            setPendingAnnouncements([]);
+            setAnnouncementAckOpen(false);
+          }
+        }
+      } else {
+        setMembers([]);
+        setPendingAnnouncements([]);
+        setAnnouncementAckOpen(false);
+      }
     })();
     return () => {
       cancelled = true;
@@ -1944,6 +2033,31 @@ export default function ChatApp({
     s.on('collab:tree-refresh', onCollabTreeRefresh);
     return () => {
       s.off('collab:tree-refresh', onCollabTreeRefresh);
+    };
+  }, [ioSocket]);
+
+  useEffect(() => {
+    const s = ioSocket;
+    if (!s) return;
+    const onAnnouncementNew = (p: GroupAnnouncement) => {
+      const cur = activeRef.current;
+      if (cur?.kind !== 'group' || cur.id !== p.groupId) return;
+      setPendingAnnouncements((prev) => {
+        if (prev.some((x) => x.id === p.id)) return prev;
+        return [...prev, p];
+      });
+      setAnnouncementAckOpen(true);
+    };
+    const onAnnouncementResponded = (p: { announcementId: number; groupId: number }) => {
+      const cur = activeRef.current;
+      if (cur?.kind !== 'group' || cur.id !== p.groupId) return;
+      setAnnouncementStatsRefreshKey((k) => k + 1);
+    };
+    s.on('announcement:new', onAnnouncementNew);
+    s.on('announcement:responded', onAnnouncementResponded);
+    return () => {
+      s.off('announcement:new', onAnnouncementNew);
+      s.off('announcement:responded', onAnnouncementResponded);
     };
   }, [ioSocket]);
 
@@ -2172,8 +2286,8 @@ export default function ChatApp({
       ? customChatTabs.find((t) => t.id === sidebarChatTab)
       : undefined;
 
-  function createCustomChatTab() {
-    const name = prompt('Название вкладки')?.trim();
+  async function createCustomChatTab() {
+    const name = (await uiPrompt('Название вкладки', { title: 'Новая вкладка' }))?.trim();
     if (!name) return;
     const id =
       typeof crypto !== 'undefined' && crypto.randomUUID
@@ -2183,14 +2297,21 @@ export default function ChatApp({
     setSidebarChatTab(id);
   }
 
-  function deleteCustomChatTab(tabId: string) {
-    if (!confirm('Удалить эту вкладку? Чаты останутся в списках «Группы» и «Личные».')) return;
+  async function deleteCustomChatTab(tabId: string) {
+    if (
+      !(await uiConfirm('Удалить эту вкладку? Чаты останутся в списках «Группы» и «Личные».', {
+        title: 'Удаление вкладки',
+        danger: true,
+        okText: 'Удалить',
+      }))
+    )
+      return;
     setCustomChatTabs((prev) => prev.filter((t) => t.id !== tabId));
     if (sidebarChatTab === tabId) setSidebarChatTab('groups');
   }
 
-  function renameCustomChatTab(tabId: string, currentName: string) {
-    const name = prompt('Новое название вкладки', currentName)?.trim();
+  async function renameCustomChatTab(tabId: string, currentName: string) {
+    const name = (await uiPrompt('Новое название вкладки', { title: 'Переименование вкладки', defaultValue: currentName }))?.trim();
     if (!name) return;
     setCustomChatTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, name } : t)));
   }
@@ -2422,7 +2543,7 @@ export default function ChatApp({
   }
 
   async function deleteMessage(m: Message) {
-    if (!confirm('Удалить это сообщение?')) return;
+    if (!(await uiConfirm('Удалить это сообщение?', { title: 'Удаление сообщения', danger: true, okText: 'Удалить' }))) return;
     try {
       await api(`/api/messages/${m.id}/delete`, { method: 'POST' });
       setMessages((prev) => prev.filter((x) => x.id !== m.id));
@@ -2431,6 +2552,17 @@ export default function ChatApp({
       showToast(e instanceof Error ? e.message : 'Не удалось удалить');
     }
   }
+
+  const fetchMessageReaders = useCallback(async (messageId: number): Promise<MessageReader[]> => {
+    try {
+      const r = await api<{ kind: string; readers: MessageReader[] }>(
+        `/api/messages/${messageId}/read-receipts`
+      );
+      return Array.isArray(r?.readers) ? r.readers : [];
+    } catch {
+      return [];
+    }
+  }, []);
 
   async function postMessageReaction(messageId: number, emoji: string) {
     try {
@@ -2723,34 +2855,6 @@ export default function ChatApp({
   const showPinInMenu =
     active && ((active.kind === 'group' && canMod) || active.kind === 'direct');
 
-  async function deleteSelectedMessages() {
-    const ids = Object.keys(selectedMessageIds)
-      .filter((k) => selectedMessageIds[+k])
-      .map(Number);
-    const msgs = ids.map((id) => messages.find((x) => x.id === id)).filter(Boolean) as Message[];
-    if (!msgs.length) return;
-    if (!msgs.every((mm) => canDeleteMessage(mm))) {
-      showToast('Есть сообщения, которые вам нельзя удалить');
-      return;
-    }
-    if (!confirm(`Удалить выбранные сообщения (${msgs.length})?`)) return;
-    try {
-      const r = await api<{ deletedIds: number[] }>('/api/messages/delete-batch', {
-        method: 'POST',
-        json: { ids },
-      });
-      const del = new Set(r.deletedIds);
-      setMessages((prev) => prev.filter((x) => !del.has(x.id)));
-      setPins((prev) => prev.filter((x) => !del.has(x.id)));
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : 'Не удалось удалить');
-      return;
-    }
-    setSelectedMessageIds({});
-    setSelectMode(false);
-    setSelectForwardOpen(false);
-  }
-
   const normalizedSearchQ = chatSearchQuery.trim().toLowerCase();
   const searchDateRange = useMemo(
     () => normalizeSearchDateRange(chatSearchDateFrom, chatSearchDateTo),
@@ -2853,50 +2957,6 @@ export default function ChatApp({
   }, [attachmentsModalOpen, active?.kind, active?.id, showToast]);
 
   const activeDirect = active?.kind === 'direct' ? directs.find((d) => d.id === active.id) : null;
-  const canClearChatHistory =
-    (active?.kind === 'direct' && !!activeDirect) || (active?.kind === 'group' && !!activeGroup);
-
-  async function clearChatHistory() {
-    if (!active || !canClearChatHistory) return;
-    const clearsAllInGroup = active.kind === 'group' && canMod;
-    const clearsOnlyOwn = active.kind === 'direct' || (active.kind === 'group' && !canMod);
-    const peerName = activeDirect?.peer.displayName ?? 'собеседником';
-    const groupName = groups.find((g) => g.id === active.id)?.name ?? 'чат';
-    const confirmText = clearsOnlyOwn
-      ? active.kind === 'direct'
-        ? `Удалить только ваши сообщения в личном чате с ${peerName}? У собеседника останется его переписка. Отменить нельзя.`
-        : `Удалить только ваши сообщения в группе «${groupName}»? Сообщения других участников не затронуты. Отменить нельзя.`
-      : `Удалить все сообщения в группе «${groupName}»? История исчезнет у всех участников. Отменить нельзя.`;
-    if (!confirm(confirmText)) return;
-    try {
-      await api('/api/chats/clear-messages', {
-        method: 'POST',
-        json: { chatKind: active.kind, chatId: active.id },
-      });
-      setChatHeaderMenuOpen(false);
-      if (clearsAllInGroup) {
-        setMessages([]);
-        setPins([]);
-        setGroups((prev) =>
-          prev.map((g) =>
-            g.id === active.id ? { ...g, lastMessagePreview: null, lastMessageAt: null } : g
-          )
-        );
-      } else {
-        await reloadActiveMessages();
-        const pl =
-          active.kind === 'group'
-            ? await api<Message[]>(`/api/groups/${active.id}/pins`).catch(() => [])
-            : await api<Message[]>(`/api/direct/${active.id}/pins`).catch(() => []);
-        setPins(pl);
-        await refreshLists();
-      }
-      void refreshUnread();
-      showToast(clearsOnlyOwn ? 'Ваши сообщения удалены' : 'История чата очищена');
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : 'Не удалось очистить чат');
-    }
-  }
 
   const chatMuted =
     !!active && isChatMutedPrefs(prefs, active.kind, active.id);
@@ -2931,8 +2991,13 @@ export default function ChatApp({
               <button type="button" onClick={() => setModal('joinGroup')}>
                 Войти в группу
               </button>
-              <button type="button" onClick={() => setModal('invites')}>
+              <button type="button" className="lc-invites-btn" onClick={() => setModal('invites')}>
                 Приглашения
+                {inviteCount > 0 && (
+                  <span className="lc-invites-badge" aria-label={`Новых приглашений: ${inviteCount}`}>
+                    {inviteCount > 99 ? '99+' : inviteCount}
+                  </span>
+                )}
               </button>
             </div>
           </div>
@@ -2942,8 +3007,16 @@ export default function ChatApp({
           <div className="lc-sidebar-toolbar">
             <p className="lc-sidebar-toolbar-label">Коллеги</p>
             <div className="row-actions">
-              <button type="button" onClick={() => setModal('friends')}>
+              <button type="button" className="lc-invites-btn" onClick={() => setModal('friends')}>
                 Коллеги
+                {friendRequestCount > 0 && (
+                  <span
+                    className="lc-invites-badge"
+                    aria-label={`Новых заявок в коллеги: ${friendRequestCount}`}
+                  >
+                    {friendRequestCount > 99 ? '99+' : friendRequestCount}
+                  </span>
+                )}
               </button>
             </div>
           </div>
@@ -3111,7 +3184,7 @@ export default function ChatApp({
                 <p className="lc-chat-section-empty">Вы ещё не в группах — создайте или вступите по коду.</p>
               ) : (
                 sortedGroups.map((g) => (
-                  <div key={`g-${g.id}`} style={{ display: 'flex', gap: 4, alignItems: 'stretch' }}>
+                  <div key={`g-${g.id}`} style={{ display: 'flex', gap: 4, alignItems: 'stretch', minWidth: 0 }}>
                     <button
                       type="button"
                       className={`chat-item ${active?.kind === 'group' && active.id === g.id ? 'active' : ''}`}
@@ -3208,7 +3281,7 @@ export default function ChatApp({
                 </p>
               ) : (
                 sortedDirects.map((d) => (
-                  <div key={`d-${d.id}`} style={{ display: 'flex', gap: 4 }}>
+                  <div key={`d-${d.id}`} style={{ display: 'flex', gap: 4, minWidth: 0 }}>
                     <button
                       type="button"
                       className={`chat-item ${active?.kind === 'direct' && active.id === d.id ? 'active' : ''}`}
@@ -3303,7 +3376,7 @@ export default function ChatApp({
                     const g = groups.find((x) => x.id === e.id);
                     if (!g) return null;
                     return (
-                      <div key={`cg-${e.id}`} style={{ display: 'flex', gap: 4, alignItems: 'stretch' }}>
+                      <div key={`cg-${e.id}`} style={{ display: 'flex', gap: 4, alignItems: 'stretch', minWidth: 0 }}>
                         <button
                           type="button"
                           className={`chat-item ${active?.kind === 'group' && active.id === g.id ? 'active' : ''}`}
@@ -3385,7 +3458,7 @@ export default function ChatApp({
                   const d = directs.find((x) => x.id === e.id);
                   if (!d) return null;
                   return (
-                    <div key={`cd-${e.id}`} style={{ display: 'flex', gap: 4 }}>
+                    <div key={`cd-${e.id}`} style={{ display: 'flex', gap: 4, minWidth: 0 }}>
                       <button
                         type="button"
                         className={`chat-item ${active?.kind === 'direct' && active.id === d.id ? 'active' : ''}`}
@@ -3514,6 +3587,15 @@ export default function ChatApp({
                     canUseInviteInGroupMod(activeGroup.role, activeGroup.invitePolicy || 'all') && (
                     <button type="button" style={{ marginLeft: 8 }} onClick={() => setModal('groupInviteMember')}>
                       Пригласить
+                    </button>
+                  )}
+                  {canMod && (
+                    <button
+                      type="button"
+                      style={{ marginLeft: 8 }}
+                      onClick={() => setModal('groupAnnouncements')}
+                    >
+                      Объявления
                     </button>
                   )}
                   <div className="lc-group-tabs">
@@ -3752,20 +3834,6 @@ export default function ChatApp({
                               Показать вложения
                             </button>
                           </li>
-                          {canClearChatHistory && (
-                            <li>
-                              <button
-                                type="button"
-                                role="menuitem"
-                                className="lc-chat-header-menu-item danger"
-                                onClick={() => void clearChatHistory()}
-                              >
-                                {active.kind === 'group' && canMod
-                                  ? 'Очистить историю у всех…'
-                                  : 'Удалить мои сообщения…'}
-                              </button>
-                            </li>
-                          )}
                           {active.kind === 'group' && (
                             <li>
                               <button
@@ -3924,6 +3992,11 @@ export default function ChatApp({
                       canUseInviteInGroupMod(activeGroup.role, activeGroup.invitePolicy || 'all') && (
                       <button type="button" onClick={() => setModal('groupInviteMember')}>
                         Пригласить
+                      </button>
+                    )}
+                    {canMod && (
+                      <button type="button" onClick={() => setModal('groupAnnouncements')}>
+                        Объявления
                       </button>
                     )}
                     <div className="lc-group-tabs lc-group-tabs--in-toolbar">
@@ -4145,7 +4218,13 @@ export default function ChatApp({
                         </div>
                         <div className="lc-msg-top-right">
                           {outbound ? (
-                            <MsgReadTicks read={outbound.read} readAt={outbound.readAt} />
+                            <MsgReadTicks
+                              read={outbound.read}
+                              readAt={outbound.readAt}
+                              messageId={m.id}
+                              fetchReaders={fetchMessageReaders}
+                              onShowAll={(readers) => setReadReceiptsModal(readers)}
+                            />
                           ) : null}
                           <time className="lc-msg-clock" dateTime={m.createdAt}>
                             {formatMessageClock(m.createdAt)}
@@ -4421,23 +4500,25 @@ export default function ChatApp({
                                   </span>
                                 </button>
                               </li>
-                              <li>
-                                <button
-                                  type="button"
-                                  role="menuitem"
-                                  className="lc-msg-menu-item"
-                                  onClick={() => {
-                                    const t = m.body?.trim() || '';
-                                    void navigator.clipboard.writeText(t);
-                                    setMessageMenuOpen(null);
-                                    setForwardSubmenuOpen(false);
-                                    showToast(t ? 'Текст скопирован' : 'Нет текста');
-                                  }}
-                                >
-                                  <IconMenuCopy className="lc-msg-menu-icon" />
-                                  <span>Копировать текст</span>
-                                </button>
-                              </li>
+                              {active?.kind !== 'group' && (
+                                <li>
+                                  <button
+                                    type="button"
+                                    role="menuitem"
+                                    className="lc-msg-menu-item"
+                                    onClick={() => {
+                                      const t = m.body?.trim() || '';
+                                      void navigator.clipboard.writeText(t);
+                                      setMessageMenuOpen(null);
+                                      setForwardSubmenuOpen(false);
+                                      showToast(t ? 'Текст скопирован' : 'Нет текста');
+                                    }}
+                                  >
+                                    <IconMenuCopy className="lc-msg-menu-icon" />
+                                    <span>Копировать текст</span>
+                                  </button>
+                                </li>
+                              )}
                               {m.attachments.some((x) => x.kind === 'file') && (
                                 <li className="lc-msg-menu-forward-wrap">
                                   <button
@@ -4536,7 +4617,7 @@ export default function ChatApp({
                                       )}
                                   </li>
                                 )}
-                              {m.sender.id === me.id && (
+                              {active?.kind !== 'group' && m.sender.id === me.id && (
                                 <li>
                                   <button
                                     type="button"
@@ -4579,7 +4660,7 @@ export default function ChatApp({
                                   </button>
                                 </li>
                               )}
-                              {canDeleteMessage(m) && (
+                              {active?.kind !== 'group' && canDeleteMessage(m) && (
                                 <li>
                                   <button
                                     type="button"
@@ -4918,9 +4999,6 @@ export default function ChatApp({
                       </div>
                     )}
                   </div>
-                  <button type="button" className="danger" onClick={() => void deleteSelectedMessages()}>
-                    Удалить
-                  </button>
                 </div>
               </div>
             )}
@@ -5520,8 +5598,13 @@ export default function ChatApp({
             setMobileMoreOpen(false);
           }}
         >
-          <span className="lc-mobile-nav-icon" aria-hidden>
+          <span className="lc-mobile-nav-icon lc-mobile-nav-icon--badged" aria-hidden>
             👥
+            {friendRequestCount > 0 && (
+              <span className="lc-mobile-nav-badge">
+                {friendRequestCount > 9 ? '9+' : friendRequestCount}
+              </span>
+            )}
           </span>
           <span className="lc-mobile-nav-label">Коллеги</span>
         </button>
@@ -5585,13 +5668,18 @@ export default function ChatApp({
             </button>
             <button
               type="button"
-              className="lc-mobile-more-sheet-btn"
+              className="lc-mobile-more-sheet-btn lc-invites-btn"
               onClick={() => {
                 setModal('invites');
                 setMobileMoreOpen(false);
               }}
             >
               Приглашения
+              {inviteCount > 0 && (
+                <span className="lc-invites-badge" aria-label={`Новых приглашений: ${inviteCount}`}>
+                  {inviteCount > 99 ? '99+' : inviteCount}
+                </span>
+              )}
             </button>
             <button
               type="button"
@@ -5727,23 +5815,33 @@ export default function ChatApp({
       {modal === 'createGroup' && (
         <Modal title="Новая группа" onClose={() => setModal(null)}>
           <form
+            noValidate
             onSubmit={async (e) => {
               e.preventDefault();
               const fd = new FormData(e.currentTarget);
-              await api('/api/groups', {
-                method: 'POST',
-                json: {
-                  name: fd.get('name'),
-                  password: fd.get('password') || undefined,
-                },
-              });
-              setModal(null);
-              refreshLists();
+              const name = String(fd.get('name') || '').trim();
+              if (!name) {
+                showToast('Введите название группы');
+                return;
+              }
+              try {
+                await api('/api/groups', {
+                  method: 'POST',
+                  json: {
+                    name,
+                    password: fd.get('password') || undefined,
+                  },
+                });
+                setModal(null);
+                refreshLists();
+              } catch (err) {
+                showToast(err instanceof Error ? err.message : 'Не удалось создать группу');
+              }
             }}
           >
             <div className="field">
               <label>Название</label>
-              <input name="name" required />
+              <input name="name" />
             </div>
             <div className="field">
               <label>Пароль входа (необязательно)</label>
@@ -5759,6 +5857,7 @@ export default function ChatApp({
       {modal === 'joinGroup' && (
         <Modal title="Войти в группу" onClose={() => setModal(null)}>
           <form
+            noValidate
             onSubmit={async (e) => {
               e.preventDefault();
               const fd = new FormData(e.currentTarget);
@@ -5785,7 +5884,7 @@ export default function ChatApp({
           >
             <div className="field">
               <label>Код присоединения</label>
-              <input name="joinCode" required placeholder="латиница, цифры, _ -" autoComplete="off" />
+              <input name="joinCode" placeholder="латиница, цифры, _ -" autoComplete="off" />
             </div>
             <div className="field">
               <label>Пароль чата (если установлен)</label>
@@ -5933,14 +6032,20 @@ export default function ChatApp({
         </Modal>
       )}
 
-      {modal === 'friends' && <FriendsModal onClose={() => setModal(null)} onOpenDm={async (peerId) => {
+      {modal === 'friends' && <FriendsModal onClose={() => setModal(null)} onFriendsChanged={refreshFriendState} onOpenDm={async (peerId) => {
         const r = await api<{ id: number }>('/api/direct/open', { method: 'POST', json: { peerUserId: peerId } });
         setModal(null);
         await refreshLists();
         setActive({ kind: 'direct', id: r.id });
       }} />}
 
-      {modal === 'invites' && <InvitesModal onClose={() => setModal(null)} refresh={refreshLists} />}
+      {modal === 'invites' && (
+        <InvitesModal
+          onClose={() => setModal(null)}
+          refresh={refreshLists}
+          onInvitesChanged={setInviteCount}
+        />
+      )}
       {chatPickForCustomTab && (
         <Modal
           title={
@@ -6249,6 +6354,56 @@ export default function ChatApp({
       {modal === 'groupAudit' && active?.kind === 'group' && (
         <GroupAuditModal groupId={active.id} onClose={() => setModal(null)} />
       )}
+
+      {modal === 'groupAnnouncements' && active?.kind === 'group' && canMod && (
+        <GroupAnnouncementsModal
+          groupId={active.id}
+          statsRefreshKey={announcementStatsRefreshKey}
+          onClose={() => setModal(null)}
+        />
+      )}
+
+      {readReceiptsModal && (
+        <Modal title="Прочитано" onClose={() => setReadReceiptsModal(null)}>
+          {readReceiptsModal.length === 0 ? (
+            <p className="meta">Пока никто не прочитал.</p>
+          ) : (
+            <ul className="lc-read-receipts-list">
+              {readReceiptsModal.map((rr) => (
+                <li key={rr.id} className="lc-read-receipts-item">
+                  <span className="lc-read-receipts-user">
+                    {rr.avatarUrl ? (
+                      <img className="lc-read-receipts-avatar" src={resolveUrl(rr.avatarUrl)} alt="" />
+                    ) : (
+                      <span className="lc-read-receipts-avatar lc-read-receipts-avatar--fallback">
+                        {rr.displayName.slice(0, 1).toUpperCase()}
+                      </span>
+                    )}
+                    <span className="lc-read-receipts-name">
+                      {rr.displayName}
+                      {rr.tag ? <span className="meta"> @{rr.tag}</span> : null}
+                    </span>
+                  </span>
+                  <span className="lc-read-receipts-time">{formatReceiptWhen(rr.readAt)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </Modal>
+      )}
+
+      {announcementAckOpen && pendingAnnouncements.length > 0 && active?.kind === 'group' && (
+        <AnnouncementAckModal
+          announcements={pendingAnnouncements}
+          onResponded={(id) => {
+            setPendingAnnouncements((prev) => {
+              const next = prev.filter((a) => a.id !== id);
+              if (next.length === 0) setAnnouncementAckOpen(false);
+              return next;
+            });
+          }}
+        />
+      )}
       </div>
     </div>
   );
@@ -6305,34 +6460,75 @@ function ProfileModal({
   onMeUpdated?: (u: User) => void;
   showToast: (m: ToastPayload) => void;
 }) {
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+
   return (
     <Modal title="Профиль" onClose={onClose}>
       <form
+        noValidate
         onSubmit={async (e) => {
           e.preventDefault();
+          setErr('');
           const fd = new FormData(e.currentTarget);
-          const out = new FormData();
-          out.append('displayName', String(fd.get('displayName')));
-          out.append('bio', String(fd.get('bio') || ''));
-          const av = (e.currentTarget.elements.namedItem('avatar') as HTMLInputElement)?.files?.[0];
-          if (av) out.append('avatar', av);
-          const u = await apiForm<User>('/api/me', out, 'PATCH');
-          onMeUpdated?.(u);
-          onSaved();
-          onClose();
+          const displayName = String(fd.get('displayName') || '').trim();
+          const tag = String(fd.get('tag') || '').trim();
+          const currentPassword = String(fd.get('currentPassword') || '');
+          const newPassword = String(fd.get('newPassword') || '');
+          const confirmPassword = String(fd.get('confirmPassword') || '');
+          const wantPassword = !!(currentPassword || newPassword || confirmPassword);
+
+          if (!displayName) {
+            setErr('Введите отображаемое имя');
+            return;
+          }
+          if (wantPassword) {
+            if (!currentPassword || !newPassword) {
+              setErr('Заполните текущий и новый пароль');
+              return;
+            }
+            if (newPassword.length < 6) {
+              setErr('Новый пароль должен быть не короче 6 символов');
+              return;
+            }
+            if (newPassword !== confirmPassword) {
+              setErr('Новый пароль и подтверждение не совпадают');
+              return;
+            }
+          }
+
+          setBusy(true);
+          try {
+            const out = new FormData();
+            out.append('displayName', displayName);
+            let updated = await apiForm<User>('/api/me', out, 'PATCH');
+
+            const tagChanged = !!tag && tag.toLowerCase() !== (me.tag || '').toLowerCase();
+            if (tagChanged) {
+              updated = await api<User>('/api/me/tag', { method: 'PATCH', json: { tag } });
+            }
+
+            if (wantPassword) {
+              await api('/api/me/password', {
+                method: 'POST',
+                json: { currentPassword, newPassword },
+              });
+            }
+
+            onMeUpdated?.(updated);
+            onSaved();
+            showToast('Изменения профиля сохранены');
+            onClose();
+          } catch (er) {
+            setErr(er instanceof Error ? er.message : 'Не удалось сохранить изменения');
+          } finally {
+            setBusy(false);
+          }
         }}
       >
         <div className="field">
           <label>Отображаемое имя</label>
-          <input name="displayName" defaultValue={me.displayName} required />
-        </div>
-        <div className="field">
-          <label>О себе</label>
-          <textarea name="bio" defaultValue={me.bio || ''} rows={3} />
-        </div>
-        <div className="field">
-          <label>Аватар (файл)</label>
-          <input name="avatar" type="file" accept="image/*" />
+          <input name="displayName" defaultValue={me.displayName} />
         </div>
         <div className="field">
           <label>
@@ -6341,28 +6537,31 @@ function ProfileModal({
               Один тег на всю систему — по нему вас однозначно находят среди коллег, в группах и в @упоминаниях. Регистр не важен.
             </span>
           </label>
-          <input name="tag" defaultValue={me.tag} maxLength={32} pattern="[a-zA-Z0-9_]{3,32}" />
-          <button
-            type="button"
-            className="primary"
-            style={{ marginTop: 8 }}
-            onClick={async (ev) => {
-              const form = (ev.currentTarget.closest('form') as HTMLFormElement);
-              const tag = String(new FormData(form).get('tag') || '');
-              try {
-                await api('/api/me/tag', { method: 'PATCH', json: { tag } });
-                onClose();
-                window.location.reload();
-              } catch (e) {
-                showToast(e instanceof Error ? e.message : 'Не удалось сохранить тег');
-              }
-            }}
-          >
-            Сохранить тег
-          </button>
+          <input name="tag" defaultValue={me.tag} maxLength={32} />
         </div>
-        <button type="submit" className="primary">
-          Сохранить профиль
+
+        <div className="lc-sidebar-divider" aria-hidden>
+          —
+        </div>
+        <p className="meta" style={{ marginTop: 0 }}>
+          Смена пароля (необязательно) — заполните поля ниже, только если хотите изменить пароль.
+        </p>
+        <div className="field">
+          <label>Текущий пароль</label>
+          <input name="currentPassword" type="password" autoComplete="current-password" />
+        </div>
+        <div className="field">
+          <label>Новый пароль</label>
+          <input name="newPassword" type="password" autoComplete="new-password" />
+        </div>
+        <div className="field">
+          <label>Повторите новый пароль</label>
+          <input name="confirmPassword" type="password" autoComplete="new-password" />
+        </div>
+
+        {err && <p className="error">{err}</p>}
+        <button type="submit" className="primary" disabled={busy}>
+          {busy ? 'Сохранение…' : 'Сохранить изменения'}
         </button>
       </form>
     </Modal>
@@ -6372,9 +6571,11 @@ function ProfileModal({
 function FriendsModal({
   onClose,
   onOpenDm,
+  onFriendsChanged,
 }: {
   onClose: () => void;
   onOpenDm: (id: number) => void;
+  onFriendsChanged?: () => void | Promise<void>;
 }) {
   const [friendTag, setFriendTag] = useState('');
   const [friendErr, setFriendErr] = useState('');
@@ -6399,10 +6600,11 @@ function FriendsModal({
       setFriends(f);
       setPending(p);
       setLoadErr('');
+      void onFriendsChanged?.();
     } catch (er) {
       if (mountedRef.current) setLoadErr((er as Error).message || 'Ошибка загрузки');
     }
-  }, []);
+  }, [onFriendsChanged]);
 
   useEffect(() => {
     void load();
@@ -6479,7 +6681,18 @@ function FriendsModal({
       <ul>
         {pending.outgoing.map((u) => (
           <li key={u.id}>
-            {u.displayName} <span className="meta">@{u.tag}</span>
+            {u.displayName} <span className="meta">@{u.tag}</span>{' '}
+            <button
+              type="button"
+              className="danger"
+              onClick={() =>
+                api('/api/friends/cancel', { method: 'POST', json: { userId: u.id } })
+                  .then(() => load())
+                  .catch((er: Error) => setFriendErr(er.message))
+              }
+            >
+              Отменить
+            </button>
           </li>
         ))}
       </ul>
@@ -6509,14 +6722,32 @@ function FriendsModal({
   );
 }
 
-function InvitesModal({ onClose, refresh }: { onClose: () => void; refresh: () => void }) {
-  const [rows, setRows] = useState<{ id: number; group_id: number; group_name: string }[]>([]);
+function InvitesModal({
+  onClose,
+  refresh,
+  onInvitesChanged,
+}: {
+  onClose: () => void;
+  refresh: () => void;
+  onInvitesChanged?: (count: number) => void;
+}) {
+  type InviteRow = {
+    id: number;
+    group_id: number;
+    group_name: string;
+    has_password?: number;
+  };
+  const [rows, setRows] = useState<InviteRow[]>([]);
   const [err, setErr] = useState('');
+  const [busyId, setBusyId] = useState<number | null>(null);
   useEffect(() => {
     let cancelled = false;
-    api<{ id: number; group_id: number; group_name: string }[]>('/api/groups/invites/incoming')
+    api<InviteRow[]>('/api/groups/invites/incoming')
       .then((r) => {
-        if (!cancelled) setRows(r);
+        if (!cancelled) {
+          setRows(r);
+          onInvitesChanged?.(Array.isArray(r) ? r.length : 0);
+        }
       })
       .catch((er: Error) => {
         if (!cancelled) setErr(er.message || 'Ошибка загрузки');
@@ -6524,34 +6755,72 @@ function InvitesModal({ onClose, refresh }: { onClose: () => void; refresh: () =
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [onInvitesChanged]);
+
+  async function declineInvite(r: InviteRow) {
+    setBusyId(r.id);
+    setErr('');
+    try {
+      await api(`/api/groups/${r.group_id}/invites/decline`, { method: 'POST' });
+      setRows((prev) => {
+        const next = prev.filter((x) => x.id !== r.id);
+        onInvitesChanged?.(next.length);
+        return next;
+      });
+    } catch (er) {
+      setErr((er as Error).message || 'Не удалось отклонить приглашение');
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   return (
     <Modal title="Приглашения в группы" onClose={onClose}>
       {err && <p className="error">{err}</p>}
-      <ul>
+      <ul className="lc-invites-list">
         {rows.map((r) => (
-          <li key={r.id}>
-            {r.group_name}{' '}
+          <li key={r.id} className="lc-invite-row">
+            <span className="lc-invite-name">
+              {r.group_name} {r.has_password ? '🔒' : ''}
+            </span>
             <form
-              style={{ display: 'inline' }}
+              className="lc-invite-actions"
               onSubmit={async (e) => {
                 e.preventDefault();
                 const fd = new FormData(e.currentTarget);
+                setBusyId(r.id);
+                setErr('');
                 try {
                   await api(`/api/groups/${r.group_id}/invites/accept`, {
                     method: 'POST',
                     json: { password: fd.get('password') || undefined },
                   });
+                  setRows((prev) => {
+                    const next = prev.filter((x) => x.id !== r.id);
+                    onInvitesChanged?.(next.length);
+                    return next;
+                  });
                   refresh();
                   onClose();
                 } catch (er) {
                   setErr((er as Error).message || 'Не удалось принять приглашение');
+                  setBusyId(null);
                 }
               }}
             >
-              <input name="password" type="password" placeholder="пароль группы" />
-              <button type="submit" className="primary">
+              {r.has_password ? (
+                <input name="password" type="password" placeholder="пароль группы" />
+              ) : null}
+              <button type="submit" className="primary" disabled={busyId === r.id}>
                 Принять
+              </button>
+              <button
+                type="button"
+                className="danger"
+                disabled={busyId === r.id}
+                onClick={() => void declineInvite(r)}
+              >
+                Отклонить
               </button>
             </form>
           </li>
@@ -6600,6 +6869,134 @@ async function downloadAdminExport(pathAndQuery: string, fallbackName: string) {
   a.download = name;
   a.click();
   URL.revokeObjectURL(a.href);
+}
+
+/** Человекочитаемые названия действий журнала аудита. */
+const AUDIT_ACTION_LABELS: Record<string, string> = {
+  group_kick: 'Исключение участника',
+  group_ban: 'Блокировка участника',
+  group_unban: 'Снятие блокировки',
+  group_role: 'Изменение роли',
+  group_settings: 'Изменение настроек группы',
+  audit_log_cleared: 'Очистка журнала аудита',
+  chat_clear_all: 'Очистка истории чата у всех',
+  chat_clear_own: 'Удаление своих сообщений',
+  announcement_create: 'Создание объявления',
+  announcement_delete: 'Удаление объявления',
+  collab_folder_create: 'Создание папки документов',
+  collab_folder_move: 'Перемещение папки',
+  collab_folder_update: 'Изменение папки',
+  collab_folder_delete: 'Удаление папки',
+  collab_document_create: 'Создание документа',
+  collab_document_import_yjs: 'Импорт документа',
+  collab_document_move: 'Перемещение документа',
+  collab_document_update: 'Изменение документа',
+  collab_document_delete: 'Удаление документа',
+  task_board_create: 'Создание доски задач',
+  task_board_update: 'Изменение доски задач',
+  task_board_delete: 'Удаление доски задач',
+  task_create: 'Создание задачи',
+  task_delete: 'Удаление задачи',
+  task_attachment_upload: 'Загрузка вложения к задаче',
+  task_board_canvas_file_upload: 'Загрузка файла на доску',
+};
+
+const AUDIT_ROLE_LABELS: Record<string, string> = {
+  member: 'участник',
+  moderator: 'модератор',
+  admin: 'администратор',
+};
+
+function auditActionLabel(action: string): string {
+  return AUDIT_ACTION_LABELS[action] ?? action;
+}
+
+/** Дата и время записи журнала: «ДД.ММ.ГГГГ Ч:ММ», МСК. */
+function formatAuditWhen(iso: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat('ru-RU', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: CHAT_TIMEZONE,
+    }).formatToParts(new Date(iso));
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+    return `${get('day')}.${get('month')}.${get('year')} ${get('hour')}:${get('minute')}`;
+  } catch {
+    return iso;
+  }
+}
+
+/**
+ * Человекочитаемое описание записи аудита: подробности действия
+ * (роль, кого коснулось, названия сущностей и т.п.).
+ */
+function describeAuditMeta(
+  action: string,
+  meta: Record<string, unknown> | null,
+  nameFor: (id: number) => string
+): string | null {
+  if (!meta) return null;
+  const target =
+    typeof meta.targetUserName === 'string' && meta.targetUserName
+      ? (meta.targetUserName as string)
+      : typeof meta.targetUserId === 'number'
+        ? nameFor(meta.targetUserId as number)
+        : null;
+  const name = typeof meta.name === 'string' ? (meta.name as string) : null;
+  const title = typeof meta.title === 'string' ? (meta.title as string) : null;
+  switch (action) {
+    case 'group_role': {
+      const role = typeof meta.role === 'string' ? AUDIT_ROLE_LABELS[meta.role] ?? meta.role : '';
+      return `${target ?? 'Участник'} → роль: ${role}`;
+    }
+    case 'group_kick':
+      return `Исключён: ${target ?? '—'}`;
+    case 'group_unban':
+      return `Разблокирован: ${target ?? '—'}`;
+    case 'group_ban': {
+      const until =
+        typeof meta.until === 'string' && meta.until
+          ? ` до ${formatAuditWhen(meta.until as string)}`
+          : ' (бессрочно)';
+      return `Заблокирован: ${target ?? '—'}${until}`;
+    }
+    case 'audit_log_cleared': {
+      const n = typeof meta.deletedCount === 'number' ? meta.deletedCount : null;
+      return n != null ? `Удалено записей: ${n}` : null;
+    }
+    case 'announcement_create':
+    case 'announcement_delete':
+      return null;
+    case 'collab_folder_create':
+    case 'collab_folder_update':
+    case 'collab_folder_delete':
+      return name ? `Папка: «${name}»` : null;
+    case 'collab_document_create':
+    case 'collab_document_update':
+    case 'collab_document_delete':
+    case 'collab_document_import_yjs':
+      return name ? `Документ: «${name}»` : null;
+    case 'task_board_create':
+    case 'task_board_update':
+    case 'task_board_delete':
+      return name ? `Доска: «${name}»` : null;
+    case 'task_create':
+    case 'task_delete':
+      return title ? `Задача: «${title}»` : null;
+    default: {
+      // Мягкий фолбэк: показать понятные пары ключ-значение, а не сырой JSON.
+      const known = ['name', 'title', 'role', 'documentId', 'boardId', 'folderId'];
+      const bits: string[] = [];
+      for (const k of known) {
+        if (meta[k] != null && typeof meta[k] !== 'object') bits.push(`${k}: ${String(meta[k])}`);
+      }
+      return bits.length ? bits.join(', ') : null;
+    }
+  }
 }
 
 function GroupAuditModal({ groupId, onClose }: { groupId: number; onClose: () => void }) {
@@ -6667,6 +7064,17 @@ function GroupAuditModal({ groupId, onClose }: { groupId: number; onClose: () =>
     };
   }, [groupId, actorId, action, qDebounced]);
 
+  const nameFor = useCallback(
+    (id: number): string => {
+      const fromFacet = facets.actors.find((u) => u.id === id);
+      if (fromFacet) return fromFacet.displayName || fromFacet.username || `#${id}`;
+      const fromRow = rows.find((r) => r.actor?.id === id)?.actor;
+      if (fromRow) return fromRow.displayName || fromRow.username || `#${id}`;
+      return `Пользователь #${id}`;
+    },
+    [facets.actors, rows]
+  );
+
   function resetFilters() {
     setActorId('');
     setAction('');
@@ -6688,9 +7096,10 @@ function GroupAuditModal({ groupId, onClose }: { groupId: number; onClose: () =>
 
   async function clearLog() {
     if (
-      !window.confirm(
-        'Удалить все записи журнала аудита этой группы? Останется одна служебная запись о факте очистки.'
-      )
+      !(await uiConfirm(
+        'Удалить все записи журнала аудита этой группы? Останется одна служебная запись о факте очистки.',
+        { title: 'Очистка журнала', danger: true, okText: 'Очистить' }
+      ))
     )
       return;
     setClearBusy(true);
@@ -6741,7 +7150,7 @@ function GroupAuditModal({ groupId, onClose }: { groupId: number; onClose: () =>
             <option value="">Все действия</option>
             {facets.actions.map((a) => (
               <option key={a} value={a}>
-                {a}
+                {auditActionLabel(a)}
               </option>
             ))}
           </select>
@@ -6817,25 +7226,22 @@ function GroupAuditModal({ groupId, onClose }: { groupId: number; onClose: () =>
         className="lc-audit-list"
         style={{ maxHeight: '50vh', overflow: 'auto', padding: 0, listStyle: 'none', margin: 0 }}
       >
-        {rows.map((r) => (
-          <li key={r.id} style={{ borderBottom: '1px solid var(--border)', padding: '0.45rem 0' }}>
-            <div className="meta">
-              {r.createdAt} · {r.actor?.displayName ?? '—'} · {r.action}
-            </div>
-            {r.meta && Object.keys(r.meta).length > 0 ? (
-              <pre
-                style={{
-                  fontSize: '0.78rem',
-                  margin: '0.25rem 0 0',
-                  whiteSpace: 'pre-wrap',
-                  color: 'var(--muted)',
-                }}
-              >
-                {JSON.stringify(r.meta)}
-              </pre>
-            ) : null}
-          </li>
-        ))}
+        {rows.map((r) => {
+          const detail = describeAuditMeta(r.action, r.meta, nameFor);
+          return (
+            <li key={r.id} style={{ borderBottom: '1px solid var(--border)', padding: '0.55rem 0' }}>
+              <div className="lc-audit-line">
+                <span className="lc-audit-action">{auditActionLabel(r.action)}</span>
+                <span className="meta lc-audit-when">{formatAuditWhen(r.createdAt)}</span>
+              </div>
+              <div className="meta lc-audit-actor">
+                {r.actor?.displayName ?? '—'}
+                {r.actor?.tag ? <span> @{r.actor.tag}</span> : null}
+              </div>
+              {detail ? <div className="lc-audit-detail">{detail}</div> : null}
+            </li>
+          );
+        })}
       </ul>
     </Modal>
   );
@@ -6878,6 +7284,7 @@ function GroupAdminModal({
       {!loading && !detail && <p className="error">Не удалось загрузить настройки</p>}
       {!loading && detail && (
         <form
+          noValidate
           onSubmit={async (e) => {
             e.preventDefault();
             setSaveErr('');
@@ -6892,7 +7299,6 @@ function GroupAdminModal({
                   clearPassword: fd.get('clearPassword') === 'on',
                   joinCode: String(fd.get('joinCode') ?? '').trim(),
                   forwardLocked: fd.get('forwardLocked') === 'on',
-                  moderateProfanity: fd.get('moderateProfanity') === 'on',
                   invitePolicy: String(fd.get('invitePolicy') || 'all'),
                 },
               });
@@ -6923,13 +7329,6 @@ function GroupAdminModal({
             <label>
               <input type="checkbox" name="forwardLocked" defaultChecked={!!detail.forwardLocked} />{' '}
               Запретить пересылку сообщений из этого чата в другие
-            </label>
-          </div>
-          <div className="field">
-            <label>
-              <input type="checkbox" name="moderateProfanity" defaultChecked={!!detail.moderateProfanity} />{' '}
-              Скрывать нецензурные слова звёздочками в чате, названиях документов/досок/задач и комментариях к
-              задачам (для всех, кроме автора текста). Текст внутри совместного редактора не фильтруется.
             </label>
           </div>
           <div className="field">
@@ -6989,6 +7388,7 @@ function GroupModModal({
   refresh: () => Promise<void>;
   notify: (msg: string) => void;
 }) {
+  const [banRefresh, setBanRefresh] = useState(0);
   async function runModerationAction(action: () => Promise<unknown>) {
     try {
       await action();
@@ -7015,7 +7415,6 @@ function GroupModModal({
             <div className="lc-group-mod-member-line">
               <span>
                 <strong>{u.displayName}</strong> @{u.tag} · {u.role}
-                {u.banned ? ' · забанен' : ''}
               </span>
               <span className="row-actions lc-group-mod-actions">
                 {u.id !== me.id && friendIds[u.id] && (
@@ -7081,26 +7480,20 @@ function GroupModModal({
                   <button
                     type="button"
                     className="danger"
-                    onClick={() =>
-                      runModerationAction(() =>
+                    onClick={async () => {
+                      const ok = await uiConfirm(
+                        `Забанить ${u.displayName}? Пользователь будет исключён из группы и не сможет вернуться (по коду или приглашению), пока вы его не разбаните.`,
+                        { title: 'Бан пользователя', danger: true, okText: 'Забанить' }
+                      );
+                      if (!ok) return;
+                      await runModerationAction(() =>
                         api(`/api/groups/${groupId}/ban`, { method: 'POST', json: { userId: u.id } })
-                      )
-                    }
+                      );
+                      setBanRefresh((n) => n + 1);
+                    }}
                   >
                     Бан
                   </button>
-                  {u.banned && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        runModerationAction(() =>
-                          api(`/api/groups/${groupId}/unban`, { method: 'POST', json: { userId: u.id } })
-                        )
-                      }
-                    >
-                      Разбанить
-                    </button>
-                  )}
                   {role === 'admin' && u.role !== 'admin' && (
                     <>
                       <button
@@ -7138,7 +7531,80 @@ function GroupModModal({
           </li>
         ))}
       </ul>
+      {role !== 'member' && (
+        <GroupBannedSection groupId={groupId} notify={notify} refreshKey={banRefresh} />
+      )}
     </Modal>
+  );
+}
+
+function GroupBannedSection({
+  groupId,
+  notify,
+  refreshKey,
+}: {
+  groupId: number;
+  notify: (msg: string) => void;
+  refreshKey: number;
+}) {
+  const [rows, setRows] = useState<(User & { bannedAt?: string })[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [busyId, setBusyId] = useState<number | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api<(User & { bannedAt?: string })[]>(`/api/groups/${groupId}/bans`);
+      setRows(Array.isArray(r) ? r : []);
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Не удалось загрузить список забаненных');
+    } finally {
+      setLoaded(true);
+    }
+  }, [groupId, notify]);
+
+  useEffect(() => {
+    void load();
+  }, [load, refreshKey]);
+
+  return (
+    <div className="lc-group-banned-section">
+      <h4>Забаненные пользователи</h4>
+      {loaded && rows.length === 0 && <p className="meta">Нет забаненных пользователей</p>}
+      <ul className="lc-group-mod-members">
+        {rows.map((u) => (
+          <li key={u.id}>
+            <div className="lc-group-mod-member-line">
+              <span>
+                <strong>{u.displayName}</strong> @{u.tag}
+              </span>
+              <span className="row-actions lc-group-mod-actions">
+                <button
+                  type="button"
+                  disabled={busyId === u.id}
+                  onClick={async () => {
+                    setBusyId(u.id);
+                    try {
+                      await api(`/api/groups/${groupId}/unban`, {
+                        method: 'POST',
+                        json: { userId: u.id },
+                      });
+                      setRows((prev) => prev.filter((x) => x.id !== u.id));
+                      notify('Пользователь разбанен');
+                    } catch (e) {
+                      notify(e instanceof Error ? e.message : 'Не удалось разбанить');
+                    } finally {
+                      setBusyId(null);
+                    }
+                  }}
+                >
+                  Разбанить
+                </button>
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

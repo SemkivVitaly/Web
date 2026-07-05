@@ -10,6 +10,7 @@ import {
 } from 'react';
 import type { Socket } from 'socket.io-client';
 import { api, apiForm, resolveUrl } from '../api';
+import { uiConfirm, uiPrompt } from '../ui/dialogs';
 import type { CollabDocSummary, CollabFolderSummary, User } from '../types';
 import {
   inferCollabDocTypeFromDiskImportFile,
@@ -296,7 +297,7 @@ export function GroupWorkspace({
 
   // --- Обход папок, открытие документа, импорт с диска, DnD перемещения ---
 
-  function enterFolder(f: CollabFolderSummary) {
+  async function enterFolder(f: CollabFolderSummary) {
     if (!isMod && f.hasPassword && !folderPw[f.id]) {
       let p = '';
       if (f.passwordFingerprint) {
@@ -304,7 +305,7 @@ export function GroupWorkspace({
         if (e && e.fp === f.passwordFingerprint) p = e.pw;
       }
       if (!p) {
-        p = prompt(`Пароль папки «${f.name}»`) || '';
+        p = (await uiPrompt(`Пароль папки «${f.name}»`, { title: 'Требуется пароль' })) || '';
         if (!p) return;
       }
       setFolderPw((prev) => ({ ...prev, [f.id]: p }));
@@ -313,7 +314,7 @@ export function GroupWorkspace({
     setCurrentFolderId(f.id);
   }
 
-  function openDoc(d: CollabDocSummary) {
+  async function openDoc(d: CollabDocSummary) {
     if (!isMod && d.hasPassword && !passwords[d.id]) {
       let p = '';
       if (d.passwordFingerprint) {
@@ -321,7 +322,7 @@ export function GroupWorkspace({
         if (e && e.fp === d.passwordFingerprint) p = e.pw;
       }
       if (!p) {
-        p = prompt(`Пароль для «${d.name}»`) || '';
+        p = (await uiPrompt(`Пароль для «${d.name}»`, { title: 'Требуется пароль' })) || '';
         if (!p) return;
       }
       setPasswords((prev) => ({ ...prev, [d.id]: p }));
@@ -439,7 +440,7 @@ export function GroupWorkspace({
     if (!isMod && docRow?.hasPassword) {
       let sp = passwords[docId] || '';
       if (!sp) {
-        sp = prompt(`Пароль документа «${docRow.name}», чтобы переместить его`) || '';
+        sp = (await uiPrompt(`Пароль документа «${docRow.name}», чтобы переместить его`, { title: 'Требуется пароль' })) || '';
         if (!sp) return;
         setPasswords((prev) => ({ ...prev, [docId]: sp }));
         rememberDocUnlock(groupId, docId, docRow.passwordFingerprint, sp);
@@ -451,7 +452,7 @@ export function GroupWorkspace({
       if (tf?.hasPassword) {
         let pw = folderPw[targetFolderId] || '';
         if (!pw) {
-          pw = prompt(`Пароль папки «${tf.name}», куда переносите документ`) || '';
+          pw = (await uiPrompt(`Пароль папки «${tf.name}», куда переносите документ`, { title: 'Требуется пароль' })) || '';
           if (!pw) return;
           setFolderPw((prev) => ({ ...prev, [targetFolderId]: pw }));
           rememberFolderUnlock(groupId, targetFolderId, tf.passwordFingerprint, pw);
@@ -470,7 +471,7 @@ export function GroupWorkspace({
     if (!isMod && movingFolder?.hasPassword) {
       let sp = folderPw[movingFolderId] || '';
       if (!sp) {
-        sp = prompt(`Пароль папки «${movingFolder.name}», чтобы переместить её`) || '';
+        sp = (await uiPrompt(`Пароль папки «${movingFolder.name}», чтобы переместить её`, { title: 'Требуется пароль' })) || '';
         if (!sp) return;
         setFolderPw((prev) => ({ ...prev, [movingFolderId]: sp }));
         rememberFolderUnlock(groupId, movingFolderId, movingFolder.passwordFingerprint, sp);
@@ -482,7 +483,7 @@ export function GroupWorkspace({
       if (tf?.hasPassword) {
         let pw = folderPw[targetParentId] || '';
         if (!pw) {
-          pw = prompt(`Пароль папки назначения «${tf.name}»`) || '';
+          pw = (await uiPrompt(`Пароль папки назначения «${tf.name}»`, { title: 'Требуется пароль' })) || '';
           if (!pw) return;
           setFolderPw((prev) => ({ ...prev, [targetParentId]: pw }));
           rememberFolderUnlock(groupId, targetParentId, tf.passwordFingerprint, pw);
@@ -801,7 +802,7 @@ export function GroupWorkspace({
                   title="Удалить документ"
                   onClick={async (e) => {
                     e.stopPropagation();
-                    if (!confirm(`Удалить документ «${d.name}»?`)) return;
+                    if (!(await uiConfirm(`Удалить документ «${d.name}»?`, { title: 'Удаление документа', danger: true, okText: 'Удалить' }))) return;
                     try {
                       await api(`/api/collab-docs/${d.id}`, { method: 'DELETE' });
                       setSelected((s) => (s?.id === d.id ? null : s));
@@ -831,11 +832,17 @@ export function GroupWorkspace({
           <div className="modal" role="dialog" onClick={(e) => e.stopPropagation()}>
             <h3>Новый документ</h3>
             <form
+              noValidate
               onSubmit={async (e) => {
                 e.preventDefault();
                 const fd = new FormData(e.currentTarget);
+                const name = String(fd.get('name') || '').trim();
+                if (!name) {
+                  setErr('Введите название документа');
+                  return;
+                }
                 const json: Record<string, unknown> = {
-                  name: fd.get('name'),
+                  name,
                   docType: fd.get('docType'),
                   description: String(fd.get('description') || '').trim() || undefined,
                   password: fd.get('password') || undefined,
@@ -847,17 +854,21 @@ export function GroupWorkspace({
                     if (pw) json.folderPassword = pw;
                   }
                 }
-                await api(`/api/groups/${groupId}/collab-docs`, {
-                  method: 'POST',
-                  json,
-                });
-                setModalDoc(false);
-                refresh();
+                try {
+                  await api(`/api/groups/${groupId}/collab-docs`, {
+                    method: 'POST',
+                    json,
+                  });
+                  setModalDoc(false);
+                  refresh();
+                } catch (er) {
+                  setErr((er as Error).message);
+                }
               }}
             >
               <div className="field">
                 <label>Название</label>
-                <input name="name" required />
+                <input name="name" />
               </div>
               <div className="field">
                 <label>Описание</label>
@@ -865,7 +876,7 @@ export function GroupWorkspace({
               </div>
               <div className="field">
                 <label>Тип</label>
-                <select name="docType" className="lc-select-field" required defaultValue="richtext">
+                <select name="docType" className="lc-select-field" defaultValue="richtext">
                   <option value="richtext">Документ Word</option>
                   <option value="spreadsheet">Книга Excel</option>
                 </select>
@@ -890,11 +901,17 @@ export function GroupWorkspace({
           <div className="modal" role="dialog" onClick={(e) => e.stopPropagation()}>
             <h3>Новая папка</h3>
             <form
+              noValidate
               onSubmit={async (e) => {
                 e.preventDefault();
                 const fd = new FormData(e.currentTarget);
+                const name = String(fd.get('name') || '').trim();
+                if (!name) {
+                  setErr('Введите название папки');
+                  return;
+                }
                 const json: Record<string, unknown> = {
-                  name: fd.get('name'),
+                  name,
                   password: fd.get('password') || undefined,
                 };
                 if (currentFolderId != null) {
@@ -904,17 +921,21 @@ export function GroupWorkspace({
                     if (pw) json.parentFolderPassword = pw;
                   }
                 }
-                await api(`/api/groups/${groupId}/collab-folders`, {
-                  method: 'POST',
-                  json,
-                });
-                setModalFolder(false);
-                refresh();
+                try {
+                  await api(`/api/groups/${groupId}/collab-folders`, {
+                    method: 'POST',
+                    json,
+                  });
+                  setModalFolder(false);
+                  refresh();
+                } catch (er) {
+                  setErr((er as Error).message);
+                }
               }}
             >
               <div className="field">
                 <label>Название</label>
-                <input name="name" required />
+                <input name="name" />
               </div>
               <div className="field">
                 <label>Пароль папки (необязательно)</label>
@@ -936,13 +957,19 @@ export function GroupWorkspace({
           <div className="modal" role="dialog" onClick={(e) => e.stopPropagation()}>
             <h3>Документ «{editDoc.name}»</h3>
             <form
+              noValidate
               onSubmit={async (e) => {
                 e.preventDefault();
                 const fd = new FormData(e.currentTarget);
                 const clear = fd.get('clearPassword') === 'on';
                 const newPw = String(fd.get('newPassword') || '').trim();
+                const name = String(fd.get('name') || '').trim();
+                if (!name) {
+                  setErr('Введите название документа');
+                  return;
+                }
                 const json: Record<string, unknown> = {
-                  name: String(fd.get('name') || '').trim(),
+                  name,
                   description: String(fd.get('description') || '').trim(),
                 };
                 if (clear) json.clearPassword = true;
@@ -958,7 +985,7 @@ export function GroupWorkspace({
             >
               <div className="field">
                 <label>Название</label>
-                <input name="name" required defaultValue={editDoc.name} />
+                <input name="name" defaultValue={editDoc.name} />
               </div>
               <div className="field">
                 <label>Описание</label>
@@ -994,25 +1021,35 @@ export function GroupWorkspace({
           <div className="modal" role="dialog" onClick={(e) => e.stopPropagation()}>
             <h3>Папка «{editFolder.name}»</h3>
             <form
+              noValidate
               onSubmit={async (e) => {
                 e.preventDefault();
                 const fd = new FormData(e.currentTarget);
                 const clear = fd.get('clearPassword') === 'on';
                 const newPw = String(fd.get('newPassword') || '').trim();
-                const json: Record<string, unknown> = { name: String(fd.get('name') || '').trim() };
+                const name = String(fd.get('name') || '').trim();
+                if (!name) {
+                  setErr('Введите название папки');
+                  return;
+                }
+                const json: Record<string, unknown> = { name };
                 if (clear) json.clearPassword = true;
                 else if (newPw) json.password = newPw;
-                await api(`/api/collab-folders/${editFolder.id}`, {
-                  method: 'PATCH',
-                  json,
-                });
-                setEditFolder(null);
-                refresh();
+                try {
+                  await api(`/api/collab-folders/${editFolder.id}`, {
+                    method: 'PATCH',
+                    json,
+                  });
+                  setEditFolder(null);
+                  refresh();
+                } catch (er) {
+                  setErr((er as Error).message);
+                }
               }}
             >
               <div className="field">
                 <label>Название</label>
-                <input name="name" required defaultValue={editFolder.name} />
+                <input name="name" defaultValue={editFolder.name} />
               </div>
               <div className="field">
                 <label>Новый пароль (оставьте пустым, если не меняете)</label>
@@ -1050,7 +1087,7 @@ export function GroupWorkspace({
                 const msg = folderDeleteWithContents
                   ? `Удалить папку «${editFolder.name}» вместе со всем содержимым? Это нельзя отменить.`
                   : `Удалить папку «${editFolder.name}»? Содержимое останется в группе — на уровень выше.`;
-                if (!confirm(msg)) return;
+                if (!(await uiConfirm(msg, { title: 'Удаление папки', danger: true, okText: 'Удалить' }))) return;
                 const del = editFolder;
                 try {
                   await api(`/api/collab-folders/${del.id}?deleteContents=${folderDeleteWithContents ? '1' : '0'}`, {

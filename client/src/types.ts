@@ -87,7 +87,6 @@ export type GroupSummary = {
   role: string;
   createdAt: string;
   forwardLocked?: boolean;
-  moderateProfanity?: boolean;
   invitePolicy?: InvitePolicy;
   /** Только у администратора в ответе API */
   joinCode?: string | null;

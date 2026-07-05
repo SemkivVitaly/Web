@@ -16,29 +16,13 @@ import { requireAuth } from './middleware.js';
 import { hashPassword, verifyPassword, verifyToken } from './auth.js';
 import { upload, decodeMultipartFilename } from './upload.js';
 import { checkCollabDocAccess, getOrCreateYDoc, evictCollabDoc } from './collabSync.js';
-import { maskProfanity } from './profanityFilter.js';
-import { shouldMaskGroupTextForViewer } from './moderation.js';
 import * as Y from 'yjs';
 import { writeAudit } from './auditLog.js';
 
-// --- Внутренние хелперы: аудит, маскировка текста, членство, канбан sync/hydrate, дерево задач, удаление коллаб-дерева ---
+// --- Внутренние хелперы: аудит, членство, канбан sync/hydrate, дерево задач, удаление коллаб-дерева ---
 
 function auditGroup(db, actorId, groupId, action, meta) {
   writeAudit(db, actorId, action, 'group', groupId, meta);
-}
-
-function maskIfNeeded(db, groupId, viewerId, authorId, text) {
-  if (text == null || typeof text !== 'string') return text;
-  if (!shouldMaskGroupTextForViewer(db, groupId, viewerId, authorId)) return text;
-  return maskProfanity(text);
-}
-
-function mapTasksForViewer(db, groupId, viewerId, nodes) {
-  return nodes.map((t) => ({
-    ...t,
-    title: maskIfNeeded(db, groupId, viewerId, t.createdById, t.title),
-    description: maskIfNeeded(db, groupId, viewerId, t.createdById, t.description),
-  }));
 }
 
 /** Собственный % задачи: счётчик (done/target) или поле progress. */
@@ -135,7 +119,7 @@ function remoteSocketUserId(remote) {
   return p?.userId ?? null;
 }
 
-/** Инкрементальная синхронизация канваса: маскирование текста — под каждого получателя */
+/** Инкрементальная синхронизация канваса: payload под каждого получателя */
 function scheduleCanvasSyncUpsert(io, db, groupId, boardId, rowId) {
   void (async () => {
     try {
@@ -206,10 +190,10 @@ function hydrateCanvasItem(db, row, groupId, viewerId) {
         t.quantity_target != null && t.quantity_target > 0
           ? ` · ${t.quantity_done ?? 0}/${t.quantity_target}`
           : '';
-      base.displayTitle = maskIfNeeded(db, groupId, viewerId, t.created_by, t.title);
+      base.displayTitle = t.title;
       base.previewLine = `${t.status} · ${own}%${qty}`;
       base.taskPreview = {
-        description: maskIfNeeded(db, groupId, viewerId, t.created_by, (t.description || '').slice(0, 400)),
+        description: (t.description || '').slice(0, 400),
         status: t.status,
         progress: own,
       };
@@ -219,10 +203,10 @@ function hydrateCanvasItem(db, row, groupId, viewerId) {
       .prepare(`SELECT name, description, doc_type, created_by FROM collab_documents WHERE id = ?`)
       .get(row.collab_document_id);
     if (d) {
-      base.displayTitle = maskIfNeeded(db, groupId, viewerId, d.created_by, d.name);
+      base.displayTitle = d.name;
       base.previewLine = d.doc_type === 'spreadsheet' ? 'Таблица' : 'Текстовый документ';
       base.docPreview = {
-        description: maskIfNeeded(db, groupId, viewerId, d.created_by, (d.description || '').slice(0, 400)),
+        description: (d.description || '').slice(0, 400),
         docType: d.doc_type,
       };
     }
@@ -231,7 +215,7 @@ function hydrateCanvasItem(db, row, groupId, viewerId) {
     base.previewLine = row.file_mime || '';
     base.isImage = !!(row.file_mime && /^image\//i.test(row.file_mime));
   } else if (row.kind === 'folder') {
-    base.displayTitle = maskIfNeeded(db, groupId, viewerId, row.created_by, row.title || 'Папка');
+    base.displayTitle = row.title || 'Папка';
     const cnt = db
       .prepare(`SELECT COUNT(*) AS c FROM task_board_canvas_items WHERE parent_item_id = ?`)
       .get(row.id);
@@ -399,7 +383,7 @@ export function appendWorkspaceRoutes(r, io) {
       rows.map((x) => ({
         id: x.id,
         parentId: x.parent_id,
-        name: maskIfNeeded(db, gid, req.userId, x.created_by, x.name),
+        name: x.name,
         hasPassword: !!x.password_hash,
         passwordFingerprint: pwdFingerprint(x.password_hash),
         createdById: x.created_by,
@@ -610,7 +594,7 @@ export function appendWorkspaceRoutes(r, io) {
         return {
           id: x.id,
           folderId: x.folder_id,
-          name: maskIfNeeded(db, gid, req.userId, x.created_by, x.name),
+          name: x.name,
           docType: x.doc_type,
           hasPassword: !!x.password_hash,
           passwordFingerprint: pwdFingerprint(x.password_hash),
@@ -638,9 +622,9 @@ export function appendWorkspaceRoutes(r, io) {
     res.json(
       rows.map((x) => ({
         id: x.id,
-        title: maskIfNeeded(db, gid, req.userId, x.created_by, x.title),
+        title: x.title,
         boardId: x.board_id,
-        boardName: maskIfNeeded(db, gid, req.userId, x.board_created_by, x.board_name),
+        boardName: x.board_name,
         boardHasPassword: !!x.password_hash,
       }))
     );
@@ -680,8 +664,8 @@ export function appendWorkspaceRoutes(r, io) {
       rows.map((x) => ({
         id: x.id,
         folderId: x.folder_id,
-        name: maskIfNeeded(db, gid, req.userId, x.created_by, x.name),
-        description: maskIfNeeded(db, gid, req.userId, x.created_by, x.description || ''),
+        name: x.name,
+        description: x.description || '',
         docType: x.doc_type,
         hasPassword: !!x.password_hash,
         passwordFingerprint: pwdFingerprint(x.password_hash),
@@ -749,7 +733,7 @@ export function appendWorkspaceRoutes(r, io) {
         .get(row.folder_id, row.group_id);
       if (fold) {
         folderHasPassword = !!fold.password_hash;
-        folderName = maskIfNeeded(db, row.group_id, req.userId, fold.created_by, fold.name);
+        folderName = fold.name;
         folderPasswordFingerprint = pwdFingerprint(fold.password_hash);
       }
     }
@@ -777,8 +761,8 @@ export function appendWorkspaceRoutes(r, io) {
       folderHasPassword,
       folderName,
       folderPasswordFingerprint,
-      name: maskIfNeeded(db, row.group_id, req.userId, row.created_by, row.name),
-      description: maskIfNeeded(db, row.group_id, req.userId, row.created_by, row.description || ''),
+      name: row.name,
+      description: row.description || '',
       docType: row.doc_type,
       hasPassword: !!row.password_hash,
       passwordFingerprint: pwdFingerprint(row.password_hash),
@@ -1002,7 +986,7 @@ export function appendWorkspaceRoutes(r, io) {
     res.json(
       rows.map((x) => ({
         id: x.id,
-        name: maskIfNeeded(db, gid, req.userId, x.created_by, x.name),
+        name: x.name,
         hasPassword: !!x.password_hash,
         passwordFingerprint: pwdFingerprint(x.password_hash),
         createdAt: x.created_at,
@@ -1094,7 +1078,7 @@ export function appendWorkspaceRoutes(r, io) {
       groupId: row.group_id,
       boardHasPassword: !!row.password_hash,
       boardPasswordFingerprint: pwdFingerprint(row.password_hash),
-      boardName: maskIfNeeded(db, row.group_id, req.userId, row.board_created_by, row.board_name),
+      boardName: row.board_name,
     });
   });
 
@@ -1117,7 +1101,7 @@ export function appendWorkspaceRoutes(r, io) {
          ORDER BY CASE WHEN t.parent_id IS NULL THEN 0 ELSE 1 END, t.parent_id, t.sort_order, t.id`
       )
       .all(bid);
-    const list = mapTasksForViewer(db, a.board.group_id, req.userId, buildTaskTreeWithRollup(rows, db));
+    const list = buildTaskTreeWithRollup(rows, db);
     res.json(list);
   });
 
@@ -1178,7 +1162,7 @@ export function appendWorkspaceRoutes(r, io) {
     });
     const t = db.prepare(`SELECT * FROM tasks WHERE id = ?`).get(newTid);
     const node = buildTaskTreeWithRollup([t], db)[0];
-    res.json(mapTasksForViewer(db, a.board.group_id, req.userId, [node])[0]);
+    res.json(node);
   });
 
   // --- Задачи: журнал активности, PATCH, удаление ---
@@ -1367,7 +1351,7 @@ export function appendWorkspaceRoutes(r, io) {
     }
     const t = db.prepare(`SELECT * FROM tasks WHERE id = ?`).get(tid);
     const node = buildTaskTreeWithRollup([t], db)[0];
-    res.json(mapTasksForViewer(db, row.group_id, req.userId, [node])[0]);
+    res.json(node);
   });
 
   w.delete('/tasks/:taskId', requireAuth, (req, res) => {
@@ -1418,7 +1402,7 @@ export function appendWorkspaceRoutes(r, io) {
     res.json(
       rows.map((c) => ({
         id: c.id,
-        body: maskIfNeeded(db, row.group_id, req.userId, c.user_id, c.body),
+        body: c.body,
         createdAt: c.created_at,
         author: rowUser({
           id: c.user_id,

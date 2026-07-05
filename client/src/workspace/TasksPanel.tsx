@@ -10,6 +10,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import type { Socket } from 'socket.io-client';
 import { api, apiForm } from '../api';
+import { uiAlert, uiConfirm, uiPrompt } from '../ui/dialogs';
 import type { TaskActivityEntry, TaskBoardSummary, TaskNode, User } from '../types';
 import { TaskBoardCanvas } from './TaskBoardCanvas';
 import { mergeBoardPwFromStore, rememberTaskBoardUnlock } from './taskBoardUnlockStorage';
@@ -33,14 +34,17 @@ function isModeratorRole(role: string) {
 }
 
 /** Пустая строка / отмена — без счётчика; иначе целое ≥ 1 */
-function promptOptionalQuantityTarget(): number | undefined {
-  const q = prompt('Сколько единиц нужно сделать? (пусто — прогресс задаётся ползунком)', '');
+async function promptOptionalQuantityTarget(): Promise<number | undefined> {
+  const q = await uiPrompt('Сколько единиц нужно сделать? (пусто — прогресс задаётся ползунком)', {
+    title: 'Цель по количеству',
+    allowEmpty: true,
+  });
   if (q == null) return undefined;
   const t = q.trim();
   if (!t) return undefined;
   const n = parseInt(t, 10);
   if (!Number.isFinite(n) || n < 1) {
-    alert('Введите целое число не меньше 1 или оставьте поле пустым');
+    await uiAlert('Введите целое число не меньше 1 или оставьте поле пустым');
     return undefined;
   }
   return n;
@@ -410,7 +414,7 @@ function TaskRow({
       const rows = await api<TaskActivityEntry[]>(`/api/tasks/${task.id}/activity${q}`);
       setActivityRows(Array.isArray(rows) ? rows : []);
     } catch (e) {
-      alert((e as Error).message);
+      await uiAlert((e as Error).message);
     } finally {
       setActivityLoading(false);
     }
@@ -429,7 +433,7 @@ function TaskRow({
       onChanged();
       if (activityOpen) void loadActivity();
     } catch (er) {
-      alert((er as Error).message);
+      await uiAlert((er as Error).message);
     }
   }
 
@@ -472,7 +476,7 @@ function TaskRow({
       onChanged();
       if (activityOpen) void loadActivity();
     } catch (er) {
-      alert((er as Error).message);
+      await uiAlert((er as Error).message);
     }
   }
 
@@ -555,13 +559,16 @@ function TaskRow({
           <button
             type="button"
             title="Добавить к числу выполненных единиц"
-            onClick={() => {
+            onClick={async () => {
               const left = task.quantityTarget! - task.quantityDone;
-              const raw = prompt(`Сколько единиц отметить сделанными? (осталось ${left})`, '1');
+              const raw = await uiPrompt(`Сколько единиц отметить сделанными? (осталось ${left})`, {
+                title: 'Отметить выполненное',
+                defaultValue: '1',
+              });
               if (raw == null || !String(raw).trim()) return;
               const n = parseInt(String(raw).trim(), 10);
               if (!Number.isFinite(n) || n < 1) {
-                alert('Введите целое число ≥ 1');
+                await uiAlert('Введите целое число ≥ 1');
                 return;
               }
               void savePatch({ quantityAdd: n });
@@ -573,10 +580,10 @@ function TaskRow({
         <button
           type="button"
           onClick={async () => {
-            const title = prompt('Подзадача', 'Новая подзадача');
+            const title = await uiPrompt('Подзадача', { title: 'Новая подзадача', defaultValue: 'Новая подзадача' });
             if (!title) return;
-            const description = prompt('Описание подзадачи (необязательно)') || '';
-            const quantityTarget = promptOptionalQuantityTarget();
+            const description = (await uiPrompt('Описание подзадачи (необязательно)', { title: 'Новая подзадача', allowEmpty: true })) || '';
+            const quantityTarget = await promptOptionalQuantityTarget();
             try {
               await api(`/api/task-boards/${boardId}/tasks`, {
                 method: 'POST',
@@ -590,7 +597,7 @@ function TaskRow({
               });
               onChanged();
             } catch (er) {
-              alert((er as Error).message);
+              await uiAlert((er as Error).message);
             }
           }}
         >
@@ -607,7 +614,7 @@ function TaskRow({
             type="button"
             className="danger"
             onClick={async () => {
-              if (!confirm('Удалить задачу и подзадачи?')) return;
+              if (!(await uiConfirm('Удалить задачу и подзадачи?', { title: 'Удаление задачи', danger: true, okText: 'Удалить' }))) return;
               const q = boardPassword ? `?password=${encodeURIComponent(boardPassword)}` : '';
               await api(`/api/tasks/${task.id}${q}`, { method: 'DELETE' });
               onChanged();
@@ -656,7 +663,7 @@ function TaskRow({
             e.preventDefault();
             setCommentsFileDropHover(false);
             const list = e.dataTransfer.files?.length ? [...e.dataTransfer.files] : [];
-            if (list.length) void uploadTaskAttachmentFiles(list).catch((er) => alert((er as Error).message));
+            if (list.length) void uploadTaskAttachmentFiles(list).catch((er) => void uiAlert((er as Error).message));
           }}
         >
           <p className="meta lc-task-comments-drop-hint">
@@ -767,7 +774,7 @@ function TaskRow({
                     className="danger lc-comment-delete"
                     title="Удалить комментарий"
                     onClick={async () => {
-                      if (!confirm('Удалить этот комментарий?')) return;
+                      if (!(await uiConfirm('Удалить этот комментарий?', { title: 'Удаление комментария', danger: true, okText: 'Удалить' }))) return;
                       const q = boardPassword ? `?password=${encodeURIComponent(boardPassword)}` : '';
                       await api(`/api/tasks/${task.id}/comments/${c.id}${q}`, { method: 'DELETE' });
                       loadExtra();
@@ -1108,9 +1115,9 @@ export function TasksPanel({
 
   // --- UI: выбор доски с запросом пароля при необходимости ---
 
-  function selectBoard(b: TaskBoardSummary) {
+  async function selectBoard(b: TaskBoardSummary) {
     if (b.hasPassword && !(effectiveBoardPw[b.id] ?? '').trim()) {
-      const p = prompt(`Пароль доски «${b.name}»`) || '';
+      const p = (await uiPrompt(`Пароль доски «${b.name}»`, { title: 'Требуется пароль' })) || '';
       if (!p) return;
       setBoardPw((prev) => ({ ...prev, [b.id]: p }));
       rememberTaskBoardUnlock(groupId, b.id, b.passwordFingerprint, p);
@@ -1158,10 +1165,10 @@ export function TasksPanel({
                   type="button"
                   className="danger"
                   onClick={async () => {
-                    if (!confirm(`Удалить доску «${b.name}» и все задачи?`)) return;
+                    if (!(await uiConfirm(`Удалить доску «${b.name}» и все задачи?`, { title: 'Удаление доски', danger: true, okText: 'Удалить' }))) return;
                     let pw = effectiveBoardPw[b.id] || '';
                     if (b.hasPassword && !pw) {
-                      pw = prompt('Пароль доски') || '';
+                      pw = (await uiPrompt('Пароль доски', { title: 'Требуется пароль' })) || '';
                       if (!pw) return;
                     }
                     const q = pw ? `?password=${encodeURIComponent(pw)}` : '';
@@ -1220,8 +1227,8 @@ export function TasksPanel({
             <button
               type="button"
               title="Сохранить текущий фильтр как быстрый вид"
-              onClick={() => {
-                const name = prompt('Название сохранённого вида', '');
+              onClick={async () => {
+                const name = await uiPrompt('Название сохранённого вида', { title: 'Сохранить вид' });
                 if (name == null || !name.trim()) return;
                 const id = `v_${Date.now()}`;
                 const next: TaskSavedView[] = [
@@ -1264,10 +1271,10 @@ export function TasksPanel({
               type="button"
               className="primary"
               onClick={async () => {
-                const title = prompt('Название задачи (корень)');
+                const title = await uiPrompt('Название задачи (корень)', { title: 'Новая задача' });
                 if (!title) return;
-                const description = prompt('Описание (необязательно)') || '';
-                const quantityTarget = promptOptionalQuantityTarget();
+                const description = (await uiPrompt('Описание (необязательно)', { title: 'Новая задача', allowEmpty: true })) || '';
+                const quantityTarget = await promptOptionalQuantityTarget();
                 try {
                   await api(`/api/task-boards/${selectedBoard}/tasks`, {
                     method: 'POST',
@@ -1280,7 +1287,7 @@ export function TasksPanel({
                   });
                   loadTasks();
                 } catch (er) {
-                  alert((er as Error).message);
+                  await uiAlert((er as Error).message);
                 }
               }}
             >
@@ -1305,22 +1312,32 @@ export function TasksPanel({
           <div className="modal" role="dialog" onClick={(e) => e.stopPropagation()}>
             <h3>Доска «{editBoard.name}»</h3>
             <form
+              noValidate
               onSubmit={async (e) => {
                 e.preventDefault();
                 const fd = new FormData(e.currentTarget);
                 const clear = fd.get('clearPassword') === 'on';
                 const newPw = String(fd.get('newPassword') || '').trim();
-                const json: Record<string, unknown> = { name: String(fd.get('name') || '').trim() };
+                const name = String(fd.get('name') || '').trim();
+                if (!name) {
+                  await uiAlert('Введите название доски');
+                  return;
+                }
+                const json: Record<string, unknown> = { name };
                 if (clear) json.clearPassword = true;
                 else if (newPw) json.password = newPw;
-                await api(`/api/task-boards/${editBoard.id}`, { method: 'PATCH', json });
-                setEditBoard(null);
-                loadBoards();
+                try {
+                  await api(`/api/task-boards/${editBoard.id}`, { method: 'PATCH', json });
+                  setEditBoard(null);
+                  loadBoards();
+                } catch (er) {
+                  await uiAlert((er as Error).message);
+                }
               }}
             >
               <div className="field">
                 <label>Название</label>
-                <input name="name" required defaultValue={editBoard.name} />
+                <input name="name" defaultValue={editBoard.name} />
               </div>
               <div className="field">
                 <label>Новый пароль доски (пусто — не менять)</label>
@@ -1347,23 +1364,33 @@ export function TasksPanel({
           <div className="modal" role="dialog" onClick={(e) => e.stopPropagation()}>
             <h3>Новая доска</h3>
             <form
+              noValidate
               onSubmit={async (e) => {
                 e.preventDefault();
                 const fd = new FormData(e.currentTarget);
-                await api(`/api/groups/${groupId}/task-boards`, {
-                  method: 'POST',
-                  json: {
-                    name: fd.get('name'),
-                    password: fd.get('password') || undefined,
-                  },
-                });
-                setModal(false);
-                loadBoards();
+                const name = String(fd.get('name') || '').trim();
+                if (!name) {
+                  await uiAlert('Введите название доски');
+                  return;
+                }
+                try {
+                  await api(`/api/groups/${groupId}/task-boards`, {
+                    method: 'POST',
+                    json: {
+                      name,
+                      password: fd.get('password') || undefined,
+                    },
+                  });
+                  setModal(false);
+                  loadBoards();
+                } catch (er) {
+                  await uiAlert((er as Error).message);
+                }
               }}
             >
               <div className="field">
                 <label>Название</label>
-                <input name="name" required />
+                <input name="name" />
               </div>
               <div className="field">
                 <label>Пароль доски (необязательно)</label>

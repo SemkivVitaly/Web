@@ -6,6 +6,7 @@
 import { useState, useEffect, lazy, Suspense } from 'react';
 import { api, getToken, setToken } from './api';
 import type { User } from './types';
+import { DialogHost } from './ui/dialogs';
 
 const ChatApp = lazy(() => import('./ChatApp'));
 
@@ -65,10 +66,17 @@ export default function App() {
     setMe(null);
   }
 
-  if (loading) return <div className="login-page">Загрузка…</div>;
+  if (loading)
+    return (
+      <>
+        <div className="login-page">Загрузка…</div>
+        <DialogHost />
+      </>
+    );
 
   if (!me) {
     return (
+      <>
       <div className="lc-auth-screen">
         <div className="lc-auth-card">
           <div className="lc-auth-brand">
@@ -113,13 +121,18 @@ export default function App() {
           </div>
           <form
             className="lc-auth-form"
+            noValidate
             onSubmit={(e) => {
               e.preventDefault();
               const fd = new FormData(e.currentTarget);
-              const username = String(fd.get('username') || '');
+              const username = String(fd.get('username') || '').trim();
               const password = String(fd.get('password') || '');
-              const displayName = String(fd.get('displayName') || username);
+              const displayName = String(fd.get('displayName') || username).trim();
               setErr('');
+              if (!username || !password || (authMode === 'register' && !displayName)) {
+                setErr('Заполните все поля');
+                return;
+              }
               (authMode === 'login' ? onLogin(username, password) : onRegister(username, password, displayName)).catch(
                 (er: Error) => setErr(er.message)
               );
@@ -127,12 +140,12 @@ export default function App() {
           >
             <div className="field">
               <label>Имя пользователя</label>
-              <input name="username" required autoComplete="username" placeholder="ivanov" />
+              <input name="username" autoComplete="username" placeholder="ivanov" />
             </div>
             {authMode === 'register' && (
               <div className="field">
                 <label>Отображаемое имя</label>
-                <input name="displayName" required placeholder="Иван Иванов" />
+                <input name="displayName" placeholder="Иван Иванов" />
               </div>
             )}
             <div className="field">
@@ -140,7 +153,6 @@ export default function App() {
               <input
                 name="password"
                 type="password"
-                required
                 autoComplete={authMode === 'login' ? 'current-password' : 'new-password'}
               />
             </div>
@@ -154,12 +166,17 @@ export default function App() {
           </p>
         </div>
       </div>
+      <DialogHost />
+      </>
     );
   }
 
   return (
-    <Suspense fallback={<div className="login-page">Загрузка интерфейса…</div>}>
-      <ChatApp me={me} onLogout={logout} onMeUpdated={setMe} />
-    </Suspense>
+    <>
+      <Suspense fallback={<div className="login-page">Загрузка интерфейса…</div>}>
+        <ChatApp me={me} onLogout={logout} onMeUpdated={setMe} />
+      </Suspense>
+      <DialogHost />
+    </>
   );
 }

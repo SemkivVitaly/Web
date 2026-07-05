@@ -18,6 +18,7 @@ import {
 } from 'react';
 import type { Socket } from 'socket.io-client';
 import { api, apiForm, resolveUrl } from '../api';
+import { uiConfirm, uiPrompt } from '../ui/dialogs';
 import type { CollabDocPickerRow, TaskCanvasItem, TaskNode, User } from '../types';
 import { AddItemMenu, CanvasSolutionExplorer } from './SolutionExplorer';
 import { readTaskBoardDragItemId, setTaskBoardDragItemData } from './canvasDragMime';
@@ -462,10 +463,16 @@ export function TaskBoardCanvas({
     canvasY: number;
   } | null>(null);
   const [tasksPickOpen, setTasksPickOpen] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
   const viewportRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const panRef = useRef({ x: 0, y: 0 });
   const scaleRef = useRef(1);
+  /** Панорама доски перетаскиванием ЛКМ по пустому месту. */
+  const panDragRef = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(
+    null
+  );
+  const [isPanning, setIsPanning] = useState(false);
   const pointerEmitAt = useRef(0);
   const pendingPosRef = useRef<{ parentId: number | null; getPos: () => { x: number; y: number } } | null>(null);
   const canvasFileRef = useRef<HTMLInputElement>(null);
@@ -475,6 +482,16 @@ export function TaskBoardCanvas({
   // --- Плоский список задач для диалога привязки карточки; преобразование координат viewport ↔ canvas ---
 
   const allTasks = useMemo(() => flatTasks(taskTreeRoots), [taskTreeRoots]);
+
+  // Выход из полноэкранного режима доски по Escape.
+  useEffect(() => {
+    if (!fullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setFullscreen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [fullscreen]);
 
   useEffect(() => {
     panRef.current = pan;
@@ -731,6 +748,47 @@ export function TaskBoardCanvas({
     [boardId, clientToCanvas, socket]
   );
 
+  /** Старт панорамы ЛКМ: только по пустому месту доски (не по карточке/кнопке). */
+  const onViewportMouseDown = useCallback((e: ReactMouseEvent) => {
+    if (e.button !== 0) return;
+    const el = e.target as HTMLElement;
+    if (
+      el.closest(
+        '.lc-canvas-card, .lc-canvas-mini, .lc-canvas-remote-cursor, button, a, input, textarea, select, [role="button"], .lc-canvas-ctx-menu'
+      )
+    ) {
+      return;
+    }
+    panDragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      panX: panRef.current.x,
+      panY: panRef.current.y,
+    };
+    setIsPanning(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isPanning) return;
+    const onMove = (e: MouseEvent) => {
+      const d = panDragRef.current;
+      if (!d) return;
+      const n = { x: d.panX + (e.clientX - d.startX), y: d.panY + (e.clientY - d.startY) };
+      panRef.current = n;
+      setPan(n);
+    };
+    const onUp = () => {
+      panDragRef.current = null;
+      setIsPanning(false);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [isPanning]);
+
   const patchItem = useCallback(
     async (id: number, body: Record<string, unknown>) => {
       const updated = await api<TaskCanvasItem>(`/api/task-board-canvas/${id}`, {
@@ -744,7 +802,7 @@ export function TaskBoardCanvas({
 
   const deleteItem = useCallback(
     async (id: number) => {
-      if (!confirm('Убрать элемент с доски?')) return;
+      if (!(await uiConfirm('Убрать элемент с доски?', { danger: true, okText: 'Убрать' }))) return;
       const q = boardPassword ? `?password=${encodeURIComponent(boardPassword)}` : '';
       await api(`/api/task-board-canvas/${id}${q}`, { method: 'DELETE' });
       setItems((prev) => prev.filter((i) => i.id !== id));
@@ -967,20 +1025,20 @@ export function TaskBoardCanvas({
     [patchItem]
   );
 
-  function renameExplorerFolder(id: number) {
+  async function renameExplorerFolder(id: number) {
     const it = items.find((i) => i.id === id && i.kind === 'folder');
     if (!it) return;
-    const t = prompt('Новое имя папки', it.displayTitle);
+    const t = await uiPrompt('Новое имя папки', { title: 'Переименование папки', defaultValue: it.displayTitle });
     if (t == null || !t.trim()) return;
     void patchItem(id, { title: t.trim() });
   }
 
-  function editLinkItem(id: number) {
+  async function editLinkItem(id: number) {
     const it = items.find((i) => i.id === id && i.kind === 'link');
     if (!it) return;
-    const nt = prompt('Заголовок ссылки', it.displayTitle);
+    const nt = await uiPrompt('Заголовок ссылки', { title: 'Изменить ссылку', defaultValue: it.displayTitle, allowEmpty: true });
     if (nt === null) return;
-    const nu = prompt('URL', it.linkUrl || '');
+    const nu = await uiPrompt('URL', { title: 'Изменить ссылку', defaultValue: it.linkUrl || '' });
     if (nu == null || !String(nu).trim()) return;
     void patchItem(id, { title: nt.trim(), linkUrl: String(nu).trim() });
   }
@@ -1001,7 +1059,7 @@ export function TaskBoardCanvas({
     try {
       switch (key) {
         case 'folder': {
-          const name = prompt('Название папки на доске');
+          const name = await uiPrompt('Название папки на доске', { title: 'Новая папка' });
           if (!name?.trim()) return;
           const pos = getPos();
           const json: Record<string, unknown> = {
@@ -1020,9 +1078,12 @@ export function TaskBoardCanvas({
           break;
         }
         case 'task_new': {
-          const title = prompt('Название задачи');
+          const title = await uiPrompt('Название задачи', { title: 'Новая задача' });
           if (!title?.trim()) return;
-          const qtyQ = prompt('Сколько единиц нужно сделать? (пусто — прогресс ползунком)', '');
+          const qtyQ = await uiPrompt('Сколько единиц нужно сделать? (пусто — прогресс ползунком)', {
+            title: 'Новая задача',
+            allowEmpty: true,
+          });
           let quantityTarget: number | undefined;
           if (qtyQ != null && qtyQ.trim()) {
             const n = parseInt(qtyQ.trim(), 10);
@@ -1079,9 +1140,9 @@ export function TaskBoardCanvas({
           break;
         }
         case 'link': {
-          const url = prompt('URL ссылки');
+          const url = await uiPrompt('URL ссылки', { title: 'Новая ссылка' });
           if (url == null || !String(url).trim()) return;
-          const title = prompt('Подпись (необязательно)');
+          const title = await uiPrompt('Подпись (необязательно)', { title: 'Новая ссылка', allowEmpty: true });
           if (title === null) return;
           const pos = getPos();
           const json: Record<string, unknown> = {
@@ -1128,7 +1189,7 @@ export function TaskBoardCanvas({
   };
 
   return (
-    <div className="lc-task-canvas-wrap">
+    <div className={`lc-task-canvas-wrap${fullscreen ? ' lc-task-canvas-wrap--fullscreen' : ''}`}>
       {err && <p className="error">{err}</p>}
       <input
         ref={canvasFileRef}
@@ -1207,6 +1268,15 @@ export function TaskBoardCanvas({
                 }}
               >
                 Сброс вида
+              </button>
+              <button
+                type="button"
+                className="lc-task-canvas-fullscreen-btn"
+                title={fullscreen ? 'Свернуть (Esc)' : 'Открыть доску на весь экран'}
+                aria-pressed={fullscreen}
+                onClick={() => setFullscreen((v) => !v)}
+              >
+                {fullscreen ? '✕ Свернуть' : '⛶ Во весь экран'}
               </button>
             </span>
             <span className="meta lc-task-canvas-hint">
@@ -1288,7 +1358,8 @@ export function TaskBoardCanvas({
 
           <div
             ref={viewportRef}
-            className="lc-canvas-viewport"
+            className={`lc-canvas-viewport${isPanning ? ' lc-canvas-viewport--panning' : ''}`}
+            onMouseDown={onViewportMouseDown}
             onMouseMove={emitPointer}
             onMouseLeave={() => socket.emit('taskboard:pointer-leave', { boardId })}
           >

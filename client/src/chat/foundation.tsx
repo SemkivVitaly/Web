@@ -16,6 +16,7 @@
  * API маршрутов здесь нет — только типы из `../types` и чистые функции / презентация.
  */
 
+import { useCallback, useRef, useState } from 'react';
 import type { ReactNode, SVGProps } from 'react';
 import type { Socket } from 'socket.io-client';
 import type {
@@ -470,13 +471,91 @@ export function formatReadReceiptTooltip(iso: string | null | undefined): string
   }
 }
 
+/** Один прочитавший сообщение: кто и во сколько. */
+export type MessageReader = {
+  id: number;
+  displayName: string;
+  tag?: string;
+  avatarUrl?: string | null;
+  readAt: string | null;
+};
+
+/** Дата+время прочтения для строки в поповере, формат «ДД.ММ Ч:ММ», МСК. */
+export function formatReceiptWhen(iso: string | null | undefined): string {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    const parts = new Intl.DateTimeFormat('ru-RU', {
+      day: '2-digit',
+      month: '2-digit',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: CHAT_TIMEZONE,
+    }).formatToParts(d);
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+    return `${get('day')}.${get('month')} ${get('hour')}:${get('minute')}`;
+  } catch {
+    return '';
+  }
+}
+
+/** Порог: сколько прочитавших показываем в поповере до кнопки «показать всех». */
+export const READ_RECEIPTS_POPOVER_LIMIT = 5;
+
 /**
  * Две галочки (или одна) у исходящего сообщения: отправлено / прочитано собеседником.
+ * При наведении на прочитанное сообщение показывает поповер со списком прочитавших и временем
+ * (данные подгружаются через `fetchReaders`).
  */
-export function MsgReadTicks({ read, readAt }: { read: boolean; readAt: string | null }) {
+export function MsgReadTicks({
+  read,
+  readAt,
+  messageId,
+  fetchReaders,
+  onShowAll,
+}: {
+  read: boolean;
+  readAt: string | null;
+  messageId?: number;
+  fetchReaders?: (id: number) => Promise<MessageReader[]>;
+  onShowAll?: (readers: MessageReader[]) => void;
+}) {
   const title = read ? formatReadReceiptTooltip(readAt) : 'Отправлено';
+  const canPopover = read && messageId != null && !!fetchReaders;
+  const [open, setOpen] = useState(false);
+  const [readers, setReaders] = useState<MessageReader[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const loadedFor = useRef<number | null>(null);
+
+  const load = useCallback(() => {
+    if (messageId == null || !fetchReaders) return;
+    if (loadedFor.current === messageId) return;
+    loadedFor.current = messageId;
+    setLoading(true);
+    fetchReaders(messageId)
+      .then((rs) => setReaders(rs))
+      .catch(() => setReaders([]))
+      .finally(() => setLoading(false));
+  }, [messageId, fetchReaders]);
+
+  const show = () => {
+    if (!canPopover) return;
+    setOpen(true);
+    load();
+  };
+  const hide = () => setOpen(false);
+
   return (
-    <span className="lc-msg-read-wrap" title={title}>
+    <span
+      className="lc-msg-read-wrap"
+      title={canPopover ? undefined : title}
+      onMouseEnter={show}
+      onMouseLeave={hide}
+      onFocus={show}
+      onBlur={hide}
+      tabIndex={canPopover ? 0 : undefined}
+    >
       <span
         className={`lc-msg-ticks${read ? ' lc-msg-ticks--read' : ' lc-msg-ticks--sent'}`}
         aria-hidden
@@ -490,6 +569,37 @@ export function MsgReadTicks({ read, readAt }: { read: boolean; readAt: string |
           <span className="lc-msg-tick">✓</span>
         )}
       </span>
+      {open && canPopover && (
+        <span className="lc-msg-receipts-pop" role="tooltip">
+          <span className="lc-msg-receipts-pop-title">Прочитано</span>
+          {loading && <span className="lc-msg-receipts-empty">Загрузка…</span>}
+          {!loading && readers && readers.length === 0 && (
+            <span className="lc-msg-receipts-empty">Пока никто не прочитал</span>
+          )}
+          {!loading &&
+            readers &&
+            readers.slice(0, READ_RECEIPTS_POPOVER_LIMIT).map((rr) => (
+              <span className="lc-msg-receipts-row" key={rr.id}>
+                <span className="lc-msg-receipts-name">{rr.displayName}</span>
+                <span className="lc-msg-receipts-time">{formatReceiptWhen(rr.readAt)}</span>
+              </span>
+            ))}
+          {!loading && readers && readers.length > READ_RECEIPTS_POPOVER_LIMIT && onShowAll && (
+            <button
+              type="button"
+              className="lc-msg-receipts-showall"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onShowAll(readers);
+                setOpen(false);
+              }}
+            >
+              Показать всех ({readers.length})
+            </button>
+          )}
+        </span>
+      )}
     </span>
   );
 }

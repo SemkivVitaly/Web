@@ -69,6 +69,16 @@ db.exec(`
     UNIQUE(group_id, invitee_id)
   );
 
+  CREATE TABLE IF NOT EXISTS group_bans (
+    group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    banned_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (group_id, user_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_group_bans_group ON group_bans(group_id);
+
   CREATE TABLE IF NOT EXISTS direct_conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_low_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -320,10 +330,6 @@ try {
     db.exec(`ALTER TABLE groups ADD COLUMN forward_locked INTEGER NOT NULL DEFAULT 0`);
   }
   gCols = db.prepare(`PRAGMA table_info(groups)`).all();
-  if (!gCols.some((c) => c.name === 'moderate_profanity')) {
-    db.exec(`ALTER TABLE groups ADD COLUMN moderate_profanity INTEGER NOT NULL DEFAULT 0`);
-  }
-  gCols = db.prepare(`PRAGMA table_info(groups)`).all();
   if (!gCols.some((c) => c.name === 'invite_policy')) {
     db.exec(`ALTER TABLE groups ADD COLUMN invite_policy TEXT NOT NULL DEFAULT 'all'`);
   }
@@ -503,6 +509,52 @@ try {
   }
 } catch {
   /* ignore */
+}
+
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS group_announcements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      author_id INTEGER NOT NULL REFERENCES users(id),
+      body TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      deleted_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS announcement_attachments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      announcement_id INTEGER NOT NULL REFERENCES group_announcements(id) ON DELETE CASCADE,
+      file_name TEXT NOT NULL,
+      stored_name TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('image','file','audio','video','voice')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS announcement_acks (
+      announcement_id INTEGER NOT NULL REFERENCES group_announcements(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      status TEXT NOT NULL CHECK (status IN ('acknowledged','need_more')),
+      comment TEXT,
+      responded_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (announcement_id, user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_group_announcements_group ON group_announcements(group_id);
+    CREATE INDEX IF NOT EXISTS idx_announcement_acks_announcement ON announcement_acks(announcement_id);
+  `);
+} catch (e) {
+  console.error('group_announcements migration', e);
+}
+
+try {
+  const cols = db.prepare(`PRAGMA table_info(group_announcements)`).all();
+  if (cols.length && !cols.some((c) => c.name === 'deleted_at')) {
+    db.exec(`ALTER TABLE group_announcements ADD COLUMN deleted_at TEXT`);
+  }
+} catch (e) {
+  console.error('group_announcements deleted_at migration', e);
 }
 
 /** Единственный экземпляр `Database` процесса. */
