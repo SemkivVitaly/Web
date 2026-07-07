@@ -48,10 +48,10 @@ CORS_ORIGINS=http://localchat:3780,http://localhost:3780,http://192.168.1.50:378
 Если заходите не с localhost, в `.env` для Docker обычно задают доступный с этой сети адрес Document Server, например:
 
 ```env
-ONLYOFFICE_DOCUMENT_SERVER_URL=http://192.168.1.50:8080
+ONLYOFFICE_DOCUMENT_SERVER_URL=http://192.168.1.50:8081
 ```
 
-(порт **8080** — как в `docker-compose.yml` у сервиса `onlyoffice`).
+(порт **8081** по умолчанию — см. `ONLYOFFICE_PORT` в `docker-compose.yml`).
 
 ## Альтернатива: имя на роутере (без hosts на каждом ПК)
 

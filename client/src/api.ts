@@ -6,6 +6,9 @@
  */
 
 const TOKEN_KEY = 'localchat_token';
+/** JWT: localStorage (Socket.IO) + httpOnly cookie (REST / same-origin media). */
+
+const defaultFetchInit: RequestInit = { credentials: 'include' };
 
 /** Текущий JWT после логина; `null`, если пользователь не авторизован. */
 export function getToken(): string | null {
@@ -21,7 +24,7 @@ export function setToken(t: string | null) {
 }
 
 /**
- * Origin страницы (`https://host:port` без пути) — база для относительных путей API и `/uploads`.
+ * Origin страницы (`http://host:port` без пути) — база для относительных путей API и `/uploads`.
  */
 export function getApiOrigin(): string {
   if (typeof window === 'undefined') return '';
@@ -31,12 +34,26 @@ export function getApiOrigin(): string {
 /**
  * Собирает абсолютный URL: относительные пути с `/` префиксом клеятся к {@link getApiOrigin}.
  * Уже абсолютные `http(s)://` возвращаются без изменений.
+ * Для `/api/files/*` добавляет JWT в query (нужно для `<img src>` без заголовка Authorization).
  */
 export function resolveUrl(path: string): string {
   if (!path) return '';
   if (path.startsWith('http://') || path.startsWith('https://')) return path;
   const base = getApiOrigin();
-  return path.startsWith('/') ? `${base}${path}` : `${base}/${path}`;
+  let full = path.startsWith('/') ? `${base}${path}` : `${base}/${path}`;
+  if (full.includes('/api/files/')) {
+    const token = getToken();
+    if (token) {
+      const sep = full.includes('?') ? '&' : '?';
+      full = `${full}${sep}token=${encodeURIComponent(token)}`;
+    }
+  }
+  return full;
+}
+
+/** URL миниатюры вложения для ленты; fallback — полный url. */
+export function resolveAttachmentThumbUrl(a: { url: string; thumbUrl?: string | null }): string {
+  return resolveUrl(a.thumbUrl || a.url);
 }
 
 /**
@@ -101,7 +118,7 @@ export async function api<T>(
     headers['Content-Type'] = 'application/json';
     body = JSON.stringify(init.json);
   }
-  const res = await fetch(resolveUrl(path), { ...init, headers, body });
+  const res = await fetch(resolveUrl(path), { ...defaultFetchInit, ...init, headers, body });
   const data = await parseResponseBody(res);
   if (!res.ok) throw errorFromResponse(res, data);
   return data as T;
@@ -114,7 +131,7 @@ export async function api<T>(
  */
 export async function apiForm<T>(path: string, form: FormData, method: 'POST' | 'PATCH' = 'POST'): Promise<T> {
   const headers = withAuth({});
-  const res = await fetch(resolveUrl(path), { method, headers, body: form });
+  const res = await fetch(resolveUrl(path), { ...defaultFetchInit, method, headers, body: form });
   const data = await parseResponseBody(res);
   if (!res.ok) throw errorFromResponse(res, data);
   return data as T;
@@ -142,6 +159,7 @@ export async function apiFormWithProgress<T>(
 
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    xhr.withCredentials = true;
     xhr.open(method, url);
     if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
     xhr.responseType = 'json';

@@ -305,7 +305,7 @@ export function GroupWorkspace({
         if (e && e.fp === f.passwordFingerprint) p = e.pw;
       }
       if (!p) {
-        p = (await uiPrompt(`Пароль папки «${f.name}»`, { title: 'Требуется пароль' })) || '';
+        p = (await uiPrompt(`Пароль папки «${f.name}»`, { title: 'Требуется пароль', localStorageNotice: true })) || '';
         if (!p) return;
       }
       setFolderPw((prev) => ({ ...prev, [f.id]: p }));
@@ -322,7 +322,7 @@ export function GroupWorkspace({
         if (e && e.fp === d.passwordFingerprint) p = e.pw;
       }
       if (!p) {
-        p = (await uiPrompt(`Пароль для «${d.name}»`, { title: 'Требуется пароль' })) || '';
+        p = (await uiPrompt(`Пароль для «${d.name}»`, { title: 'Требуется пароль', localStorageNotice: true })) || '';
         if (!p) return;
       }
       setPasswords((prev) => ({ ...prev, [d.id]: p }));
@@ -440,7 +440,7 @@ export function GroupWorkspace({
     if (!isMod && docRow?.hasPassword) {
       let sp = passwords[docId] || '';
       if (!sp) {
-        sp = (await uiPrompt(`Пароль документа «${docRow.name}», чтобы переместить его`, { title: 'Требуется пароль' })) || '';
+        sp = (await uiPrompt(`Пароль документа «${docRow.name}», чтобы переместить его`, { title: 'Требуется пароль', localStorageNotice: true })) || '';
         if (!sp) return;
         setPasswords((prev) => ({ ...prev, [docId]: sp }));
         rememberDocUnlock(groupId, docId, docRow.passwordFingerprint, sp);
@@ -452,7 +452,7 @@ export function GroupWorkspace({
       if (tf?.hasPassword) {
         let pw = folderPw[targetFolderId] || '';
         if (!pw) {
-          pw = (await uiPrompt(`Пароль папки «${tf.name}», куда переносите документ`, { title: 'Требуется пароль' })) || '';
+          pw = (await uiPrompt(`Пароль папки «${tf.name}», куда переносите документ`, { title: 'Требуется пароль', localStorageNotice: true })) || '';
           if (!pw) return;
           setFolderPw((prev) => ({ ...prev, [targetFolderId]: pw }));
           rememberFolderUnlock(groupId, targetFolderId, tf.passwordFingerprint, pw);
@@ -471,7 +471,7 @@ export function GroupWorkspace({
     if (!isMod && movingFolder?.hasPassword) {
       let sp = folderPw[movingFolderId] || '';
       if (!sp) {
-        sp = (await uiPrompt(`Пароль папки «${movingFolder.name}», чтобы переместить её`, { title: 'Требуется пароль' })) || '';
+        sp = (await uiPrompt(`Пароль папки «${movingFolder.name}», чтобы переместить её`, { title: 'Требуется пароль', localStorageNotice: true })) || '';
         if (!sp) return;
         setFolderPw((prev) => ({ ...prev, [movingFolderId]: sp }));
         rememberFolderUnlock(groupId, movingFolderId, movingFolder.passwordFingerprint, sp);
@@ -483,7 +483,7 @@ export function GroupWorkspace({
       if (tf?.hasPassword) {
         let pw = folderPw[targetParentId] || '';
         if (!pw) {
-          pw = (await uiPrompt(`Пароль папки назначения «${tf.name}»`, { title: 'Требуется пароль' })) || '';
+          pw = (await uiPrompt(`Пароль папки назначения «${tf.name}»`, { title: 'Требуется пароль', localStorageNotice: true })) || '';
           if (!pw) return;
           setFolderPw((prev) => ({ ...prev, [targetParentId]: pw }));
           rememberFolderUnlock(groupId, targetParentId, tf.passwordFingerprint, pw);

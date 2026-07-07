@@ -44,7 +44,7 @@ cd client && npm install && npm run build
 cd ../server && npm install && npm start
 ```
 
-Откройте `http://<IP-этого-ПК>:3780` с любого устройства в той же сети. Для Docker см. блок **Docker Compose** ниже. Если подключён OnlyOffice **без** Docker и **`PUBLIC_BASE_URL` не задан**, базовый URL для ссылок, которые скачивает Document Server, берётся из заголовка **`Host`** запроса конфига — заход по IP даёт ссылки с IP, а не с `127.0.0.1`.
+Откройте `http://<IP-этого-ПК>:3780` с любого устройства в той же сети. Для Docker см. блок **Docker Compose**.
 
 ### Docker Compose
 
@@ -56,27 +56,27 @@ cd ../server && npm install && npm start
 
 | Переменная   | Описание |
 |-------------|----------|
-| `PORT`      | Порт (по умолчанию `3780`) |
+| `PORT`      | Порт HTTP (по умолчанию `3780`) |
+| `CLEANUP_ORPHAN_UPLOADS` | `0` — не удалять осиротевшие файлы в `uploads/` при старте |
+| `MAX_IMAGE_UPLOAD_BYTES` | Лимит размера одного изображения при загрузке (по умолчанию 20 МБ) |
 | `HOST`      | Интерфейс (по умолчанию `0.0.0.0`) |
 | `JWT_SECRET` | Секрет подписи JWT. **В production обязателен** (иначе сервер не стартует). |
 | `SQLITE_PATH` | Путь к файлу SQLite БД |
-| `NODE_ENV` | Если `production`, требуются `JWT_SECRET` и **`CORS_ORIGINS`** (через запятую, например `https://chat.lan`) |
+| `NODE_ENV` | Если `production`, требуются `JWT_SECRET` и **`CORS_ORIGINS`** (через запятую, например `http://chat.lan:3780`) |
 | `CORS_ORIGINS` | Разрешённые origin для API и Socket.io (в dev можно не задавать) |
-| `TRUST_PROXY` | `1` — если сервер за reverse-proxy (nginx): корректные IP в логах и схема/хост для OnlyOffice при авто-`PUBLIC_BASE_URL` |
 | `ONLYOFFICE_DOCUMENT_SERVER_URL` | URL OnlyOffice Document Server для браузера; пусто — без внешнего редактора |
 | `LAN_HOST` | Только сценарий **Docker Compose**: IP этого ПК в LAN — подставляется в дефолты `CORS_ORIGINS` и `ONLYOFFICE_DOCUMENT_SERVER_URL` в `docker-compose.yml` |
 | `ONLYOFFICE_PORT` | Только **Docker Compose**: порт на **хосте** для сервиса `onlyoffice` (по умолчанию **8081**). Проброс: `HOST:80` внутри контейнера. Должен совпадать с портом в `ONLYOFFICE_DOCUMENT_SERVER_URL`, если задаёте URL вручную |
-| `PUBLIC_BASE_URL` | Базовый URL вашего API **как его видит Document Server** (скачивание файлов, callback). Если не задан — берётся из запроса к API (`Host` + порт; за прокси с `TRUST_PROXY=1` — `X-Forwarded-Host` / `X-Forwarded-Proto`). В **docker compose** по умолчанию **`http://localchat:3780`** (сеть между контейнерами). Не подменяйте на `host.docker.internal`, если документы перестали открываться |
+| `PUBLIC_BASE_URL` | Базовый URL вашего API **как его видит Document Server** (скачивание файлов, callback). Если не задан — берётся из запроса к API (`Host`). В **docker compose** по умолчанию **`http://localchat:3780`** (сеть между контейнерами). Не подменяйте на `host.docker.internal`, если документы перестали открываться |
 | `ONLYOFFICE_JWT_SECRET` | Секрет JWT для converter OnlyOffice (если включён JWT на стороне DS) |
-| `COLLAB_POOL_MAX` | Лимит документов Yjs в RAM на сервере (по умолчанию `40`) |
+| `SQLITE_OPTIMIZE` | `0` — не выполнять `PRAGMA optimize` при старте (по умолчанию выполняется) |
 | `COLLAB_MAX_UPDATE_B64` | Макс. длина base64 одного апдейта collab (по умолчанию ~1.2M символов) |
 
-**Безопасность:** в релизе задайте `NODE_ENV=production`, `JWT_SECRET` и `CORS_ORIGINS`. Раньше любой залогиненный пользователь мог подписаться на Socket.io-комнату чужого чата по ID — сейчас сервер проверяет членство в группе / участие в личном диалоге.
+**Безопасность:** в релизе задайте `NODE_ENV=production`, **`JWT_SECRET`** и `CORS_ORIGINS`. Сессия: **httpOnly cookie** + JWT в `localStorage` для Socket.IO. Файлы — **`/api/files/*`** (не публичный `/uploads`). OnlyOffice: **`ONLYOFFICE_JWT_SECRET`** в production; в local docker-compose JWT на DS может быть отключён.
 
 ## Архитектура
 
-- **Backend**: Node.js, Express, Socket.io, SQLite (better-sqlite3), загрузки на диск в `server/uploads/`.
-- **Frontend**: React + Vite, Socket.io-client.
+- **Backend**: Node.js, Express, Socket.io, SQLite (better-sqlite3), загрузки на диск в `server/uploads/` (раздача через API).
+- **Frontend**: React + Vite, Socket.io-client. Auth: httpOnly cookie + localStorage JWT для WebSocket.
 
 Данные и файлы остаются на машине, где запущен сервер.
-docker compose up --build -d

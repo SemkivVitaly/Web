@@ -1,11 +1,14 @@
 /**
- * @fileoverview Точка входа сервера LocalChat: Express (CORS, JSON, `/api`, статика `uploads` и при наличии — SPA из `client/dist`),
+ * @fileoverview Точка входа сервера LocalChat: Express (CORS, JSON, `/api`, статика SPA из `client/dist`),
  * Socket.IO с JWT в handshake, комнаты `user:*`, `group:*`, `direct:*`, коллаб в `collabSync`, события канбана в группу.
- * Переменные: `PORT`, `HOST`, `CORS_ORIGINS` (обязательно в production), `TRUST_PROXY`, таймауты ping для Socket.IO.
+ * Переменные: `PORT`, `HOST`, `CORS_ORIGINS` (обязательно в production).
  */
 
 import express from 'express';
 import cors from 'cors';
+import compression from 'compression';
+import helmet from 'helmet';
+import cookieParser from 'cookie-parser';
 import http from 'http';
 import path from 'path';
 import fs from 'fs';
@@ -14,8 +17,8 @@ import { Server } from 'socket.io';
 import { getDb } from './db.js';
 import { createApiRouter } from './routes.js';
 import { verifyToken } from './auth.js';
-import { uploadsDir } from './upload.js';
 import { setupCollabSync } from './collabSync.js';
+import { cleanupOrphanUploadFiles } from './orphanCleanup.js';
 import {
   canUserJoinDirectSocketRoom,
   canUserJoinGroupSocketRoom,
@@ -25,10 +28,38 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT) || 3780;
 const HOST = process.env.HOST || '0.0.0.0';
 
+const RFC1918_HOST =
+  /^(10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)$/;
+
+/** Разрешает http(s)://localhost|127.0.0.1|localchat|RFC1918:<PORT> для LAN без правки CORS_ORIGINS. */
+function isLanAppOrigin(origin) {
+  try {
+    const u = new URL(origin);
+    const port = u.port || (u.protocol === 'https:' ? '443' : '80');
+    if (port !== String(PORT)) return false;
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    const host = u.hostname;
+    if (host === 'localhost' || host === '127.0.0.1' || host === 'localchat') return true;
+    return RFC1918_HOST.test(host);
+  } catch {
+    return false;
+  }
+}
+
 /** CORS: в production задайте CORS_ORIGINS=https://app.example.com,https://www.example.com */
 function buildCorsOptions() {
   const raw = process.env.CORS_ORIGINS?.split(/[\s,]+/).map((s) => s.trim()).filter(Boolean) ?? [];
-  if (raw.length > 0) return { origin: raw, credentials: true };
+  const allowlist = new Set(raw);
+  if (raw.length > 0) {
+    return {
+      origin(origin, callback) {
+        if (!origin) return callback(null, true);
+        if (allowlist.has(origin) || isLanAppOrigin(origin)) return callback(null, origin);
+        return callback(null, false);
+      },
+      credentials: true,
+    };
+  }
   if (process.env.NODE_ENV === 'production') {
     console.error('[FATAL] В production укажите CORS_ORIGINS (список origin через запятую).');
     process.exit(1);
@@ -36,42 +67,90 @@ function buildCorsOptions() {
   return { origin: true, credentials: true };
 }
 
+function useHttpsHeaders() {
+  const v = (process.env.USE_HTTPS || '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
+/** OnlyOffice грузит `api.js` с Document Server — origin должен быть в script-src CSP. */
+function onlyOfficeCspOrigins() {
+  const out = new Set(['http://localhost:8081', 'http://127.0.0.1:8081']);
+  const ooPort = process.env.ONLYOFFICE_PORT || '8081';
+  out.add(`http://localhost:${ooPort}`);
+  out.add(`http://127.0.0.1:${ooPort}`);
+  const raw = (process.env.ONLYOFFICE_DOCUMENT_SERVER_URL || '').trim().replace(/\/$/, '');
+  if (raw) {
+    try {
+      const u = new URL(raw);
+      out.add(`${u.protocol}//${u.host}`);
+    } catch {
+      /* ignore */
+    }
+  }
+  const lan = (process.env.LAN_HOST || '').trim();
+  if (lan) out.add(`http://${lan}:${ooPort}`);
+  return [...out];
+}
+
+function buildContentSecurityPolicyDirectives() {
+  const ooOrigins = onlyOfficeCspOrigins();
+  return {
+    'default-src': ["'self'"],
+    'script-src': ["'self'", "'unsafe-inline'", "'unsafe-eval'", 'blob:', ...ooOrigins],
+    'style-src': ["'self'", "'unsafe-inline'", ...ooOrigins],
+    'img-src': ["'self'", 'data:', 'blob:', 'https:', 'http:'],
+    'connect-src': ["'self'", 'ws:', 'wss:', 'https:', 'http:', ...ooOrigins],
+    'frame-src': ["'self'", 'https:', 'http:', ...ooOrigins],
+    'media-src': ["'self'", 'blob:', 'https:', 'http:'],
+    'worker-src': ["'self'", 'blob:', ...ooOrigins],
+    ...(useHttpsHeaders() ? {} : { 'upgrade-insecure-requests': null }),
+  };
+}
+
 const corsOptions = buildCorsOptions();
 
 const app = express();
-if (process.env.TRUST_PROXY === '1') app.set('trust proxy', 1);
-const server = http.createServer(app);
 
-const io = new Server(server, {
-  cors: corsOptions,
-  // чуть быстрее обнаруживаем «мёртвые» сокеты
-  pingTimeout: 20000,
-  pingInterval: 10000,
-  /** collab:join с большим y_state (раньше по умолчанию ~1 МБ обрывался — пустой/битый документ) */
-  maxHttpBufferSize: 32 * 1024 * 1024,
-});
-
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      useDefaults: true,
+      directives: buildContentSecurityPolicyDirectives(),
+    },
+    crossOriginEmbedderPolicy: false,
+    // Plain HTTP on LAN (e.g. http://192.168.x.x) is an untrustworthy origin — isolation headers warn in the console.
+    crossOriginOpenerPolicy: false,
+    originAgentCluster: false,
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  })
+);
+app.use(compression());
+app.use(cookieParser());
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '25mb' }));
-app.use('/uploads', express.static(uploadsDir));
-app.use('/api', createApiRouter(io));
-setupCollabSync(io);
 
 const clientDist = path.join(__dirname, '..', '..', 'client', 'dist');
 if (fs.existsSync(clientDist)) {
   app.use(express.static(clientDist));
 }
 
-// --- Socket.IO: извлечение JWT из handshake, привязка userId ---
+const httpServer = http.createServer(app);
 
-io.use((socket, next) => {
-  const token = socket.handshake.auth?.token || socket.handshake.query?.token;
-  if (!token || typeof token !== 'string') return next(new Error('auth'));
-  const payload = verifyToken(token);
-  if (!payload?.userId) return next(new Error('auth'));
-  socket.userId = payload.userId;
-  next();
+const io = new Server(httpServer, {
+  cors: corsOptions,
+  pingTimeout: 20000,
+  pingInterval: 10000,
+  maxHttpBufferSize: 32 * 1024 * 1024,
 });
+
+app.use('/api', createApiRouter(io));
+setupCollabSync(io);
+
+if (fs.existsSync(clientDist)) {
+  app.get('*', (_req, res) => {
+    res.sendFile(path.join(clientDist, 'index.html'));
+  });
+}
 
 function taskBoardGroupId(db, boardId) {
   const r = db.prepare(`SELECT group_id FROM task_boards WHERE id = ?`).get(boardId);
@@ -90,26 +169,24 @@ function canUserPointerOnTaskBoard(db, boardId, userId) {
   return m ? gid : null;
 }
 
-/** Ограничение частоты pointer-событий (защита от флуда и лишней нагрузки). */
 const pointerThrottleMs = 40;
 const lastPointerAt = new WeakMap();
 
-/** Уникальные userId в комнате чата (несколько вкладок = один пользователь). */
 const presenceRefCounts = new Map();
 function presenceKey(kind, roomId) {
   return `${kind}:${roomId}`;
 }
-function emitChatPresence(io, socketRoom, kind, roomId) {
+function emitChatPresence(ioInst, socketRoom, kind, roomId) {
   const pk = presenceKey(kind, roomId);
   const m = presenceRefCounts.get(pk);
   const onlineUserIds = m ? [...m.keys()] : [];
-  io.to(socketRoom).emit('chat:presence', {
+  ioInst.to(socketRoom).emit('chat:presence', {
     chatKind: kind,
     chatId: roomId,
     onlineUserIds,
   });
 }
-function presenceEnter(kind, roomId, userId, io, socketRoom) {
+function presenceEnter(kind, roomId, userId, ioInst, socketRoom) {
   const pk = presenceKey(kind, roomId);
   let m = presenceRefCounts.get(pk);
   if (!m) {
@@ -118,16 +195,16 @@ function presenceEnter(kind, roomId, userId, io, socketRoom) {
   }
   const prev = m.get(userId) || 0;
   m.set(userId, prev + 1);
-  if (prev === 0) emitChatPresence(io, socketRoom, kind, roomId);
+  if (prev === 0) emitChatPresence(ioInst, socketRoom, kind, roomId);
 }
-function presenceLeave(kind, roomId, userId, io, socketRoom) {
+function presenceLeave(kind, roomId, userId, ioInst, socketRoom) {
   const pk = presenceKey(kind, roomId);
   const m = presenceRefCounts.get(pk);
   if (!m) return;
   const prev = m.get(userId) || 0;
   if (prev <= 1) {
     m.delete(userId);
-    emitChatPresence(io, socketRoom, kind, roomId);
+    emitChatPresence(ioInst, socketRoom, kind, roomId);
   } else {
     m.set(userId, prev - 1);
   }
@@ -136,7 +213,14 @@ function presenceLeave(kind, roomId, userId, io, socketRoom) {
 
 const typingThrottle = new Map();
 
-// --- События сокета: join/leave чатов, typing, presence, указатели и DnD канбана ---
+io.use((socket, next) => {
+  const token = socket.handshake.auth?.token || socket.handshake.query?.token;
+  if (!token || typeof token !== 'string') return next(new Error('auth'));
+  const payload = verifyToken(token);
+  if (!payload?.userId) return next(new Error('auth'));
+  socket.userId = payload.userId;
+  next();
+});
 
 io.on('connection', (socket) => {
   const uid = socket.userId;
@@ -323,14 +407,17 @@ io.on('connection', (socket) => {
   });
 });
 
-if (fs.existsSync(clientDist)) {
-  app.get('*', (_req, res) => {
-    res.sendFile(path.join(clientDist, 'index.html'));
-  });
+getDb();
+if (process.env.CLEANUP_ORPHAN_UPLOADS !== '0') {
+  try {
+    cleanupOrphanUploadFiles();
+  } catch (e) {
+    console.warn('[orphanCleanup] startup skipped:', e?.message || e);
+  }
 }
 
-server.listen(PORT, HOST, () => {
-  console.log(`LocalChat сервер: http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
+httpServer.listen(PORT, HOST, () => {
+  console.log(`LocalChat HTTP: http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
 });
 
 process.on('unhandledRejection', (reason) => {
@@ -339,7 +426,7 @@ process.on('unhandledRejection', (reason) => {
 
 function gracefulShutdown(signal) {
   console.log(`${signal}: завершение…`);
-  server.close(() => process.exit(0));
+  httpServer.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 12_000).unref();
 }
 

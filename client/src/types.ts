@@ -19,6 +19,7 @@ export type User = {
 export type Attachment = {
   id: number;
   url: string;
+  thumbUrl?: string | null;
   fileName: string;
   mimeType: string;
   kind: string;
@@ -240,3 +241,15 @@ export type CollabDocPickerRow = {
   hasPassword?: boolean;
   passwordFingerprint?: string | null;
 };
+
+/** Уведомления и назначения группы (re-export из chat/AnnouncementModals). */
+export type {
+  AnnouncementKind,
+  AnnouncementAudience,
+  AnnouncementAttachment,
+  LinkedTaskSnapshot,
+  ProgressLogEntry,
+  GroupAnnouncement,
+  AnnouncementStatsMember,
+  AnnouncementStats,
+} from './chat/AnnouncementModals';

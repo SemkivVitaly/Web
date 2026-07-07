@@ -62,6 +62,7 @@ export default function App() {
   }
 
   function logout() {
+    void api('/api/auth/logout', { method: 'POST' }).catch(() => {});
     setToken(null);
     setMe(null);
   }

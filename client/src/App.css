@@ -309,7 +309,10 @@ a {
   gap: 0.5rem;
   min-height: 0;
   min-width: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
 }
 
 .sidebar h2 {
@@ -317,6 +320,15 @@ a {
   font-size: 1rem;
   color: var(--muted);
   font-weight: 600;
+  flex-shrink: 0;
+}
+
+/** Заголовок и кнопки — полный размер, без сжатия; при нехватке высоты прокручивается весь сайдбар. */
+.lc-sidebar-head {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
 }
 
 .lc-sidebar-toolbar {
@@ -358,6 +370,8 @@ a {
 .chat-list.lc-chat-list--tabs {
   gap: 0;
   overflow: hidden;
+  flex: 1 1 0;
+  min-height: 8rem;
 }
 
 .lc-chat-tabs {
@@ -544,12 +558,14 @@ a {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  flex: 1;
+  flex: 1 1 0;
   min-height: 0;
   min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
   padding-bottom: 0.15rem;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 /* Строки-обёртки списка чатов (кнопка + ручка перетаскивания) должны сжиматься,
@@ -1793,6 +1809,7 @@ a {
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: thin;
+  touch-action: pan-x;
 }
 
 .lc-reaction-picker::-webkit-scrollbar {
@@ -2473,6 +2490,313 @@ a {
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
 }
 
+.lc-chat-img-lightbox-counter {
+  position: absolute;
+  top: 0.45rem;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.82rem;
+  color: var(--muted);
+  user-select: none;
+  pointer-events: none;
+}
+
+.lc-chat-img-lightbox-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 2;
+  width: 2.25rem;
+  height: 2.75rem;
+  padding: 0;
+  font-size: 1.75rem;
+  line-height: 1;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.lc-chat-img-lightbox-nav:hover {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.lc-chat-img-lightbox-nav--prev {
+  left: 0.35rem;
+}
+
+.lc-chat-img-lightbox-nav--next {
+  right: 0.35rem;
+}
+
+.lc-chat-img-lightbox-annotate {
+  position: absolute;
+  top: 0.35rem;
+  right: 2.75rem;
+  z-index: 2;
+  width: 2.25rem;
+  height: 2.25rem;
+  border: none;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font-size: 1.1rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.lc-chat-img-lightbox-annotate:hover {
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.lc-chat-img-lightbox-viewport {
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  max-height: calc(92vh - 3rem);
+  min-height: 120px;
+  touch-action: none;
+  user-select: none;
+  cursor: zoom-in;
+}
+
+.lc-chat-img-lightbox-viewport--zoomed {
+  cursor: grab;
+}
+
+.lc-chat-img-lightbox-viewport--dragging {
+  cursor: grabbing;
+}
+
+.lc-chat-img-lightbox-img {
+  transform-origin: center center;
+  will-change: transform;
+}
+
+.lc-chat-img-lightbox-zoom {
+  position: absolute;
+  bottom: 0.45rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.2rem 0.35rem;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.lc-chat-img-lightbox-zoom-btn {
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.lc-chat-img-lightbox-zoom-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.lc-chat-img-lightbox-zoom-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.lc-chat-img-lightbox-zoom-btn--reset {
+  font-size: 0.95rem;
+  margin-left: 0.15rem;
+}
+
+.lc-chat-img-lightbox-zoom-label {
+  min-width: 2.75rem;
+  text-align: center;
+  font-size: 0.78rem;
+  color: var(--muted);
+  user-select: none;
+  pointer-events: none;
+}
+
+.lc-photo-annotator {
+  z-index: 120;
+}
+
+.lc-photo-annotator-inner {
+  display: flex;
+  flex-direction: column;
+  max-width: min(96vw, 1000px);
+  max-height: 92vh;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.lc-photo-annotator-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  padding: 0.65rem 0.85rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+}
+
+.lc-photo-annotator-tools {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.lc-photo-annotator-tool {
+  width: 2.1rem;
+  height: 2.1rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.lc-photo-annotator-tool--active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-dim);
+}
+
+.lc-photo-annotator-colors {
+  display: flex;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.lc-photo-annotator-color {
+  width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+}
+
+.lc-photo-annotator-color--active {
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
+.lc-photo-annotator-actions {
+  display: flex;
+  gap: 0.65rem;
+  margin-left: auto;
+}
+
+.lc-photo-annotator-canvas-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.75rem;
+  min-height: 200px;
+  background: #111;
+  overflow: auto;
+}
+
+.lc-photo-annotator-canvas {
+  max-width: 100%;
+  max-height: calc(92vh - 180px);
+  touch-action: none;
+  cursor: crosshair;
+}
+
+.lc-photo-annotator-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 0.65rem 0.85rem;
+  border-top: 1px solid var(--border);
+}
+
+.lc-composer-file-annotate {
+  border: none;
+  background: none;
+  padding: 0 0.15rem;
+  margin: 0 0.1rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+  opacity: 0.85;
+}
+
+.lc-composer-file-annotate:hover {
+  opacity: 1;
+}
+
+.msg img.attach.lc-chat-attach-img--clickable {
+  cursor: zoom-in;
+}
+
+.lc-msg-img-single {
+  margin-top: 0.5rem;
+}
+
+.lc-msg-img-grid {
+  display: grid;
+  gap: 2px;
+  margin-top: 0.5rem;
+  border-radius: 8px;
+  overflow: hidden;
+  max-width: min(100%, 360px);
+}
+
+.lc-msg-img-grid--fallback {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
+.lc-msg-img-grid--fallback img.attach {
+  width: calc(50% - 1px);
+  max-width: 160px;
+  margin-top: 0;
+  aspect-ratio: 1;
+  object-fit: cover;
+}
+
+.lc-msg-img-grid-cell {
+  display: block;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: var(--surface2);
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+  cursor: zoom-in;
+}
+
+.lc-msg-img-grid-cell img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  pointer-events: none;
+}
+
+.lc-msg-img-grid .attach {
+  margin-top: 0;
+}
+
 .lc-composer-notify-hint {
   font-size: 0.78rem;
   color: var(--muted);
@@ -2584,6 +2908,17 @@ a {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.lc-mention-picker-row--all .lc-mention-picker-name {
+  color: var(--accent, #3b82f6);
+}
+
+.lc-mention-picker-avatar--all {
+  background: color-mix(in srgb, var(--accent, #3b82f6) 18%, transparent);
+  color: var(--accent, #3b82f6);
+  font-weight: 700;
+  font-size: 0.95rem;
 }
 
 .login-page {
@@ -2871,6 +3206,41 @@ label:has(input[type='radio']) {
   margin-top: 0;
 }
 
+.lc-group-mod-member-name {
+  line-height: 1.45;
+}
+
+select.lc-group-mod-role-select {
+  display: inline-block;
+  vertical-align: baseline;
+  width: auto;
+  min-width: 0;
+  max-width: none;
+  margin: 0;
+  padding: 0 1.15rem 0 0;
+  border: none;
+  border-radius: 4px;
+  background-color: transparent;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'%3E%3Cpath d='M5.5 7.5L10 12l4.5-4.5' fill='none' stroke='%23c5cad8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-size: 0.85rem 0.85rem;
+  background-position: right center;
+  color: var(--text);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+select.lc-group-mod-role-select:hover {
+  color: var(--accent);
+}
+
+select.lc-group-mod-role-select:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(91, 140, 255, 0.25);
+  border-radius: 4px;
+}
+
 .row-actions {
   display: flex;
   flex-wrap: wrap;
@@ -2899,6 +3269,7 @@ video {
   border-top: 1px solid var(--border);
   font-size: 0.85rem;
   color: var(--muted);
+  flex-shrink: 0;
 }
 
 .pill {
@@ -5350,6 +5721,91 @@ video {
   margin-top: 2px;
 }
 
+.lc-chat-online-presence-wrap {
+  position: relative;
+  display: inline;
+}
+
+.lc-chat-online-presence-btn {
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+}
+
+.lc-chat-online-presence-btn:hover {
+  color: var(--text);
+}
+
+.lc-chat-online-list {
+  position: absolute;
+  left: 0;
+  top: calc(100% + 4px);
+  margin: 0;
+  padding: 0.35rem 0;
+  list-style: none;
+  min-width: 200px;
+  max-width: min(280px, 90vw);
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  z-index: 40;
+}
+
+.lc-chat-online-list-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+.lc-chat-online-list-avatar {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--surface2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.lc-chat-online-list-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.lc-chat-online-list-avatar-fallback {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.lc-chat-online-list-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lc-chat-online-list-tag {
+  color: var(--muted);
+  font-size: 0.8em;
+}
+
 .lc-task-filter-bar {
   flex-wrap: wrap;
   align-items: center;
@@ -5452,6 +5908,23 @@ video {
     -webkit-overflow-scrolling: touch;
     padding: 0.5rem 0.6rem 0.35rem;
     padding-bottom: calc(0.35rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .lc-sidebar-head {
+    flex-shrink: 0;
+  }
+
+  /* На узком экране сайдбар целиком прокручивается — список чатов не сжимается во flex. */
+  .chat-list.lc-chat-list--tabs {
+    flex: 0 0 auto;
+    min-height: 0;
+    overflow: visible;
+  }
+
+  .lc-chat-tab-panel {
+    min-height: 0;
+    overflow: visible;
+    flex: 0 0 auto;
   }
 
   .sidebar .row-actions {
@@ -6143,6 +6616,15 @@ a:hover {
 
 .lc-announcements-modal {
   max-width: min(960px, 96vw);
+  max-height: min(90vh, 900px);
+  overflow-y: auto;
+}
+
+.lc-announcement-recipient-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
 }
 
 .lc-announcement-create {
@@ -6253,6 +6735,162 @@ a:hover {
 
 .lc-announcement-stats-table tr:last-child td {
   border-bottom: none;
+}
+
+.lc-announcement-form-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.lc-announcement-form-row label {
+  flex: 1;
+  min-width: 140px;
+}
+
+.lc-announcement-recipients {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.65rem 0.75rem;
+}
+
+.lc-announcement-recipients-label {
+  display: block;
+  font-size: 0.9rem;
+  margin-bottom: 0.4rem;
+}
+
+.lc-announcement-recipients-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 160px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.lc-announcement-set-assignee {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  font-size: 0.88rem;
+}
+
+.lc-announcement-due {
+  margin: 0 0 0.35rem;
+}
+
+.lc-announcement-linked-task {
+  margin: 0 0 0.5rem;
+  font-size: 0.92rem;
+}
+
+.lc-announcement-linked-stats {
+  margin: 0.5rem 0;
+}
+
+.lc-announcement-status-pill--progress {
+  background: rgba(59, 130, 246, 0.15);
+  color: #1d4ed8;
+}
+
+.lc-sidebar-assignment-badge {
+  flex-shrink: 0;
+  min-width: 1.25rem;
+  height: 1.25rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  background: rgba(210, 153, 34, 0.9);
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.25rem;
+  text-align: center;
+}
+
+.lc-my-assignments-modal {
+  max-width: min(640px, 96vw);
+}
+
+.lc-my-assignments-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.lc-my-assignments-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.lc-my-assignments-item-head {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.65rem;
+  padding: 0.65rem 0.75rem;
+  background: var(--surface-2, rgba(0, 0, 0, 0.03));
+}
+
+.lc-my-assignments-item-body {
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.lc-my-assignments-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.lc-my-assignments-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.9rem;
+}
+
+.lc-my-assignments-history summary {
+  cursor: pointer;
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+.lc-my-assignments-history ul {
+  margin: 0.5rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.85rem;
+}
+
+.lc-my-assignments-badge-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.lc-my-assignments-badge {
+  min-width: 1.1rem;
+  height: 1.1rem;
+  padding: 0 0.3rem;
+  border-radius: 999px;
+  background: rgba(210, 153, 34, 0.9);
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1.1rem;
+  text-align: center;
 }
 
 /* =========================================================================

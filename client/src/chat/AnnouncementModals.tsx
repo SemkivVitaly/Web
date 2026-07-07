@@ -1,5 +1,5 @@
 /**
- * @fileoverview Модалки объявлений группы: блокирующее подтверждение ознакомления и панель модератора.
+ * @fileoverview Модалки уведомлений и назначений группы: подтверждение ознакомления и панель модератора.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -7,6 +7,9 @@ import { api, apiForm, resolveUrl } from '../api';
 import { uiConfirm } from '../ui/dialogs';
 import type { User } from '../types';
 import { formatMessageClock } from './foundation';
+
+export type AnnouncementKind = 'notice' | 'assignment' | 'linked_task';
+export type AnnouncementAudience = 'all' | 'selected';
 
 export type AnnouncementAttachment = {
   id: number;
@@ -16,16 +19,48 @@ export type AnnouncementAttachment = {
   kind: string;
 };
 
+export type LinkedTaskSnapshot = {
+  id: number;
+  title: string;
+  boardId: number;
+  boardName: string;
+  status: string;
+  progress: number;
+  quantityTarget: number | null;
+  quantityDone: number;
+  assignee: User | null;
+};
+
+export type ProgressLogEntry = {
+  id: number;
+  taskStatus: string | null;
+  progress: number | null;
+  quantityDone: number | null;
+  note: string | null;
+  createdAt: string;
+};
+
 export type GroupAnnouncement = {
   id: number;
   groupId: number;
+  kind: AnnouncementKind;
+  audience: AnnouncementAudience;
   body: string;
   createdAt: string;
+  dueAt?: string | null;
+  quantityTarget?: number | null;
   author: User;
   attachments: AnnouncementAttachment[];
+  recipients?: User[];
+  linkedTask?: LinkedTaskSnapshot | null;
   myStatus?: 'acknowledged' | 'need_more' | null;
   myComment?: string | null;
   myRespondedAt?: string | null;
+  myTaskStatus?: 'todo' | 'in_progress' | 'done' | null;
+  myProgress?: number | null;
+  myQuantityDone?: number | null;
+  myProgressNote?: string | null;
+  progressLog?: ProgressLogEntry[];
 };
 
 export type AnnouncementStatsMember = {
@@ -36,17 +71,31 @@ export type AnnouncementStatsMember = {
   status: 'acknowledged' | 'need_more' | 'pending';
   comment: string | null;
   respondedAt: string | null;
+  taskStatus?: 'todo' | 'in_progress' | 'done' | null;
+  progress?: number | null;
+  quantityDone?: number | null;
+  progressNote?: string | null;
 };
 
 export type AnnouncementStats = {
   announcement: GroupAnnouncement;
+  linkedTask?: LinkedTaskSnapshot | null;
   summary: {
     total: number;
     acknowledged: number;
     needMore: number;
     pending: number;
+    inProgress?: number;
+    done?: number;
   };
   members: AnnouncementStatsMember[];
+};
+
+export type TaskPickerItem = {
+  id: number;
+  title: string;
+  boardId: number;
+  boardName: string;
 };
 
 function formatAnnouncementWhen(iso: string): string {
@@ -63,7 +112,20 @@ function formatAnnouncementWhen(iso: string): string {
   }
 }
 
-function AnnouncementAttachmentList({ attachments }: { attachments: AnnouncementAttachment[] }) {
+function kindLabel(kind: AnnouncementKind): string {
+  if (kind === 'assignment') return 'Быстрая задача';
+  if (kind === 'linked_task') return 'Задача с доски';
+  return 'Уведомление';
+}
+
+function taskStatusLabel(s: string | null | undefined): string {
+  if (s === 'in_progress') return 'В работе';
+  if (s === 'done') return 'Выполнено';
+  if (s === 'todo') return 'К выполнению';
+  return '—';
+}
+
+export function AnnouncementAttachmentList({ attachments }: { attachments: AnnouncementAttachment[] }) {
   if (!attachments.length) return null;
   return (
     <div className="lc-announcement-attachments">
@@ -87,6 +149,31 @@ function AnnouncementAttachmentList({ attachments }: { attachments: Announcement
   );
 }
 
+export function AnnouncementCardBody({ item }: { item: GroupAnnouncement }) {
+  return (
+    <article className="lc-announcement-card">
+      <div className="lc-announcement-card-meta">
+        <span>{item.author.displayName}</span>
+        <span className="pill">{kindLabel(item.kind)}</span>
+        <span className="meta">
+          {formatAnnouncementWhen(item.createdAt)} · {formatMessageClock(item.createdAt)}
+        </span>
+      </div>
+      {item.dueAt && (
+        <p className="meta lc-announcement-due">Срок: {formatAnnouncementWhen(item.dueAt)}</p>
+      )}
+      {item.linkedTask && (
+        <p className="lc-announcement-linked-task">
+          Задача: <strong>{item.linkedTask.title}</strong>
+          <span className="meta"> · {item.linkedTask.boardName}</span>
+        </p>
+      )}
+      {item.body && <div className="lc-announcement-card-body">{item.body}</div>}
+      <AnnouncementAttachmentList attachments={item.attachments} />
+    </article>
+  );
+}
+
 function statusLabel(status: AnnouncementStatsMember['status']): string {
   if (status === 'acknowledged') return 'Ознакомлен';
   if (status === 'need_more') return 'Нужно больше информации';
@@ -97,9 +184,11 @@ function statusLabel(status: AnnouncementStatsMember['status']): string {
 export function AnnouncementAckModal({
   announcements,
   onResponded,
+  onOpenLinkedTask,
 }: {
   announcements: GroupAnnouncement[];
   onResponded: (announcementId: number) => void;
+  onOpenLinkedTask?: (taskId: number, boardId: number) => void;
 }) {
   const current = announcements[0] ?? null;
   const [needMoreMode, setNeedMoreMode] = useState(false);
@@ -139,8 +228,12 @@ export function AnnouncementAckModal({
 
   if (!current) return null;
 
+  const isTask = current.kind === 'assignment' || current.kind === 'linked_task';
+  const title = isTask ? 'Назначение' : 'Объявление группы';
+  const ackLabel = isTask ? 'Принял к исполнению' : 'Ознакомлен';
+
   return (
-    <div className="modal-backdrop lc-announcement-ack-backdrop" role="presentation">
+    <div className="modal-backdrop" role="presentation" onMouseDown={(e) => e.stopPropagation()}>
       <div
         className="modal lc-announcement-ack-modal"
         role="dialog"
@@ -148,22 +241,13 @@ export function AnnouncementAckModal({
         aria-labelledby="lc-announcement-ack-title"
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 id="lc-announcement-ack-title">Объявление группы</h3>
+        <h3 id="lc-announcement-ack-title">{title}</h3>
         {announcements.length > 1 && (
           <p className="meta lc-announcement-ack-queue">
             Осталось ответить: {announcements.length}
           </p>
         )}
-        <article className="lc-announcement-card">
-          <div className="lc-announcement-card-meta">
-            <span>{current.author.displayName}</span>
-            <span className="meta">
-              {formatAnnouncementWhen(current.createdAt)} · {formatMessageClock(current.createdAt)}
-            </span>
-          </div>
-          {current.body && <div className="lc-announcement-card-body">{current.body}</div>}
-          <AnnouncementAttachmentList attachments={current.attachments} />
-        </article>
+        <AnnouncementCardBody item={current} />
         {needMoreMode ? (
           <div className="lc-announcement-comment-box">
             <label htmlFor="lc-announcement-comment">Что нужно уточнить?</label>
@@ -197,11 +281,24 @@ export function AnnouncementAckModal({
               disabled={busy}
               onClick={() => void respond('acknowledged')}
             >
-              Ознакомлен
+              {ackLabel}
             </button>
-            <button type="button" disabled={busy} onClick={() => setNeedMoreMode(true)}>
-              Нужно больше информации
-            </button>
+            {!isTask && (
+              <button type="button" disabled={busy} onClick={() => setNeedMoreMode(true)}>
+                Нужно больше информации
+              </button>
+            )}
+            {current.kind === 'linked_task' && current.linkedTask && onOpenLinkedTask && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  onOpenLinkedTask(current.linkedTask!.id, current.linkedTask!.boardId)
+                }
+              >
+                Открыть задачу на доске
+              </button>
+            )}
           </div>
         )}
         {err && <p className="error">{err}</p>}
@@ -212,12 +309,16 @@ export function AnnouncementAckModal({
 
 export function GroupAnnouncementsModal({
   groupId,
+  members: membersProp,
   statsRefreshKey,
   onClose,
+  onOpenLinkedTask,
 }: {
   groupId: number;
+  members?: User[];
   statsRefreshKey: number;
   onClose: () => void;
+  onOpenLinkedTask?: (taskId: number, boardId: number) => void;
 }) {
   const [announcements, setAnnouncements] = useState<GroupAnnouncement[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -229,7 +330,49 @@ export function GroupAnnouncementsModal({
   const [files, setFiles] = useState<File[]>([]);
   const [createBusy, setCreateBusy] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState<number | null>(null);
+  const [kind, setKind] = useState<AnnouncementKind>('notice');
+  const [audience, setAudience] = useState<AnnouncementAudience>('all');
+  const [selectedRecipientIds, setSelectedRecipientIds] = useState<number[]>([]);
+  const [linkedTaskId, setLinkedTaskId] = useState<number | null>(null);
+  const [assignOnBoard, setAssignOnBoard] = useState(false);
+  const [dueAt, setDueAt] = useState('');
+  const [quantityTarget, setQuantityTarget] = useState('');
+  const [pickerTasks, setPickerTasks] = useState<TaskPickerItem[]>([]);
+  const [groupMembers, setGroupMembers] = useState<User[]>(() =>
+    Array.isArray(membersProp) ? membersProp : []
+  );
+  const [membersLoading, setMembersLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const loadGroupMembers = useCallback(() => {
+    setMembersLoading(true);
+    return api<User[]>(`/api/groups/${groupId}/members`)
+      .then((rows) => setGroupMembers(Array.isArray(rows) ? rows.filter((m) => !m.banned) : []))
+      .catch(() => setGroupMembers([]))
+      .finally(() => setMembersLoading(false));
+  }, [groupId]);
+
+  useEffect(() => {
+    if (Array.isArray(membersProp) && membersProp.length > 0) {
+      setGroupMembers(membersProp.filter((m) => !m.banned));
+    }
+  }, [membersProp]);
+
+  useEffect(() => {
+    void loadGroupMembers();
+  }, [loadGroupMembers]);
+
+  useEffect(() => {
+    if (audience === 'selected' && groupMembers.length === 0 && !membersLoading) {
+      void loadGroupMembers();
+    }
+  }, [audience, groupMembers.length, membersLoading, loadGroupMembers]);
+
+  useEffect(() => {
+    void api<TaskPickerItem[]>(`/api/groups/${groupId}/tasks-for-chat-picker`)
+      .then((t) => setPickerTasks(Array.isArray(t) ? t : []))
+      .catch(() => setPickerTasks([]));
+  }, [groupId]);
 
   const loadList = useCallback(() => {
     setLoading(true);
@@ -280,11 +423,25 @@ export function GroupAnnouncementsModal({
     };
   }, [selectedId, statsRefreshKey]);
 
+  function toggleRecipient(userId: number) {
+    setSelectedRecipientIds((prev) =>
+      prev.includes(userId) ? prev.filter((id) => id !== userId) : [...prev, userId]
+    );
+  }
+
   async function createAnnouncement(e: React.FormEvent) {
     e.preventDefault();
     const text = body.trim();
-    if (!text && files.length === 0) {
+    if (kind !== 'linked_task' && !text && files.length === 0) {
       setErr('Введите текст или прикрепите файлы');
+      return;
+    }
+    if (kind === 'linked_task' && !linkedTaskId) {
+      setErr('Выберите задачу с доски');
+      return;
+    }
+    if (audience === 'selected' && selectedRecipientIds.length === 0) {
+      setErr('Выберите хотя бы одного получателя');
       return;
     }
     setCreateBusy(true);
@@ -292,22 +449,48 @@ export function GroupAnnouncementsModal({
     try {
       const fd = new FormData();
       fd.append('body', text);
+      fd.append('kind', kind);
+      fd.append('audience', audience);
+      if (audience === 'selected') {
+        fd.append('recipientUserIds', JSON.stringify(selectedRecipientIds));
+      }
+      if (kind === 'linked_task' && linkedTaskId) {
+        fd.append('linkedTaskId', String(linkedTaskId));
+        if (assignOnBoard && selectedRecipientIds.length === 1) {
+          fd.append('setAssignee', 'true');
+        }
+      }
+      if (kind === 'assignment' && dueAt.trim()) fd.append('dueAt', dueAt.trim());
+      if (kind === 'assignment' && quantityTarget.trim()) {
+        fd.append('quantityTarget', quantityTarget.trim());
+      }
       for (const f of files) fd.append('files', f);
       const created = await apiForm<GroupAnnouncement>(`/api/groups/${groupId}/announcements`, fd);
       setBody('');
       setFiles([]);
+      setSelectedRecipientIds([]);
+      setLinkedTaskId(null);
+      setDueAt('');
+      setQuantityTarget('');
       if (fileInputRef.current) fileInputRef.current.value = '';
       await loadList();
       setSelectedId(created.id);
     } catch (e) {
-      setErr(e instanceof Error ? e.message : 'Не удалось создать объявление');
+      setErr(e instanceof Error ? e.message : 'Не удалось создать');
     } finally {
       setCreateBusy(false);
     }
   }
 
   async function deleteAnnouncement(id: number) {
-    if (!(await uiConfirm('Удалить это объявление?', { title: 'Удаление объявления', danger: true, okText: 'Удалить' }))) return;
+    if (
+      !(await uiConfirm('Удалить это уведомление?', {
+        title: 'Удаление',
+        danger: true,
+        okText: 'Удалить',
+      }))
+    )
+      return;
     setDeleteBusy(id);
     setErr('');
     try {
@@ -322,23 +505,147 @@ export function GroupAnnouncementsModal({
   }
 
   const selected = announcements.find((a) => a.id === selectedId) ?? null;
+  const showTaskStats = stats?.announcement.kind === 'assignment' || stats?.announcement.kind === 'linked_task';
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
       <div
         className="modal lc-announcements-modal"
         role="dialog"
+        onMouseDown={(e) => e.stopPropagation()}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3>Объявления</h3>
+        <h3>Уведомления и назначения</h3>
         <form className="lc-announcement-create" onSubmit={(e) => void createAnnouncement(e)}>
+          <div className="lc-announcement-form-row">
+            <label>
+              Тип
+              <select
+                value={kind}
+                disabled={createBusy}
+                onChange={(e) => setKind(e.target.value as AnnouncementKind)}
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <option value="notice">Уведомление</option>
+                <option value="assignment">Быстрая задача</option>
+                <option value="linked_task">Задача с доски</option>
+              </select>
+            </label>
+            <label>
+              Аудитория
+              <select
+                value={audience}
+                disabled={createBusy}
+                onChange={(e) => setAudience(e.target.value as AnnouncementAudience)}
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <option value="all">Вся группа</option>
+                <option value="selected">Выбранные участники</option>
+              </select>
+            </label>
+          </div>
+          {kind === 'linked_task' && (
+            <label>
+              Задача с доски
+              <select
+                value={linkedTaskId ?? ''}
+                disabled={createBusy}
+                onChange={(e) => setLinkedTaskId(e.target.value ? +e.target.value : null)}
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <option value="">— выберите —</option>
+                {pickerTasks.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.title} ({t.boardName})
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {kind === 'assignment' && (
+            <div className="lc-announcement-form-row">
+              <label>
+                Срок
+                <input
+                  type="datetime-local"
+                  value={dueAt}
+                  disabled={createBusy}
+                  onChange={(e) => setDueAt(e.target.value)}
+                />
+              </label>
+              <label>
+                Целевое количество
+                <input
+                  type="number"
+                  min={1}
+                  value={quantityTarget}
+                  disabled={createBusy}
+                  onChange={(e) => setQuantityTarget(e.target.value)}
+                  placeholder="Необязательно"
+                />
+              </label>
+            </div>
+          )}
+          {audience === 'selected' && (
+            <div className="lc-announcement-recipients">
+              <span className="lc-announcement-recipients-label">Получатели</span>
+              {membersLoading ? (
+                <p className="meta">Загрузка участников…</p>
+              ) : groupMembers.length === 0 ? (
+                <p className="meta">Участники не найдены.</p>
+              ) : (
+                <ul className="lc-announcement-recipients-list">
+                  {groupMembers.map((m) => (
+                    <li key={m.id}>
+                      <label className="lc-announcement-recipient-row">
+                        <input
+                          type="checkbox"
+                          checked={selectedRecipientIds.includes(m.id)}
+                          disabled={createBusy}
+                          onChange={() => toggleRecipient(m.id)}
+                        />
+                        <span>
+                          {m.displayName}
+                          <span className="meta"> @{m.tag}</span>
+                        </span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {kind === 'linked_task' && selectedRecipientIds.length === 1 && (
+                <label className="lc-announcement-set-assignee">
+                  <input
+                    type="checkbox"
+                    checked={assignOnBoard}
+                    disabled={createBusy}
+                    onChange={(e) => setAssignOnBoard(e.target.checked)}
+                  />
+                  Назначить исполнителем на доске
+                </label>
+              )}
+            </div>
+          )}
           <label>
-            Новое объявление
+            Текст
             <textarea
               rows={3}
               value={body}
               onChange={(e) => setBody(e.target.value)}
-              placeholder="Текст объявления…"
+              placeholder={
+                kind === 'linked_task'
+                  ? 'Комментарий к назначению (необязательно)…'
+                  : 'Текст уведомления…'
+              }
               disabled={createBusy}
             />
           </label>
@@ -354,15 +661,13 @@ export function GroupAnnouncementsModal({
               {createBusy ? 'Публикация…' : 'Опубликовать'}
             </button>
           </div>
-          {files.length > 0 && (
-            <p className="meta">Вложений: {files.length}</p>
-          )}
+          {files.length > 0 && <p className="meta">Вложений: {files.length}</p>}
         </form>
         {err && <p className="error">{err}</p>}
         {loading ? (
           <p className="meta">Загрузка…</p>
         ) : announcements.length === 0 ? (
-          <p className="meta">Объявлений пока нет.</p>
+          <p className="meta">Пока ничего не опубликовано.</p>
         ) : (
           <div className="lc-announcements-layout">
             <ul className="lc-announcements-list">
@@ -374,7 +679,8 @@ export function GroupAnnouncementsModal({
                     onClick={() => setSelectedId(a.id)}
                   >
                     <span className="lc-announcements-list-title">
-                      {a.body.trim().slice(0, 80) || '(без текста)'}
+                      <span className="pill">{kindLabel(a.kind)}</span>{' '}
+                      {a.body.trim().slice(0, 60) || a.linkedTask?.title || '(без текста)'}
                     </span>
                     <span className="meta">{formatAnnouncementWhen(a.createdAt)}</span>
                   </button>
@@ -383,16 +689,7 @@ export function GroupAnnouncementsModal({
             </ul>
             {selected && (
               <div className="lc-announcements-detail">
-                <div className="lc-announcement-card">
-                  <div className="lc-announcement-card-meta">
-                    <span>{selected.author.displayName}</span>
-                    <span className="meta">{formatAnnouncementWhen(selected.createdAt)}</span>
-                  </div>
-                  {selected.body && (
-                    <div className="lc-announcement-card-body">{selected.body}</div>
-                  )}
-                  <AnnouncementAttachmentList attachments={selected.attachments} />
-                </div>
+                <AnnouncementCardBody item={selected} />
                 <div className="row-actions">
                   <button
                     type="button"
@@ -402,11 +699,30 @@ export function GroupAnnouncementsModal({
                   >
                     {deleteBusy === selected.id ? 'Удаление…' : 'Удалить'}
                   </button>
+                  {selected.kind === 'linked_task' && selected.linkedTask && onOpenLinkedTask && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onOpenLinkedTask(selected.linkedTask!.id, selected.linkedTask!.boardId)
+                      }
+                    >
+                      Открыть на доске
+                    </button>
+                  )}
                 </div>
                 {statsLoading ? (
                   <p className="meta">Загрузка статистики…</p>
                 ) : stats ? (
                   <>
+                    {stats.linkedTask && (
+                      <div className="lc-announcement-linked-stats meta">
+                        Прогресс задачи на доске: {stats.linkedTask.progress}% ·{' '}
+                        {taskStatusLabel(stats.linkedTask.status)}
+                        {stats.linkedTask.assignee && (
+                          <> · {stats.linkedTask.assignee.displayName}</>
+                        )}
+                      </div>
+                    )}
                     <div className="lc-announcement-stats-summary">
                       <span className="pill lc-announcement-status-pill lc-announcement-status-pill--ack">
                         Ознакомлены: {stats.summary.acknowledged}
@@ -417,6 +733,16 @@ export function GroupAnnouncementsModal({
                       <span className="pill lc-announcement-status-pill lc-announcement-status-pill--pending">
                         Не ответили: {stats.summary.pending}
                       </span>
+                      {showTaskStats && stats.summary.inProgress != null && (
+                        <span className="pill lc-announcement-status-pill lc-announcement-status-pill--progress">
+                          В работе: {stats.summary.inProgress}
+                        </span>
+                      )}
+                      {showTaskStats && stats.summary.done != null && (
+                        <span className="pill lc-announcement-status-pill lc-announcement-status-pill--ack">
+                          Выполнено: {stats.summary.done}
+                        </span>
+                      )}
                     </div>
                     <div className="lc-announcement-stats-table-wrap">
                       <table className="lc-announcement-stats-table">
@@ -424,12 +750,14 @@ export function GroupAnnouncementsModal({
                           <tr>
                             <th>ФИО</th>
                             <th>Статус</th>
+                            {showTaskStats && <th>Задача</th>}
+                            {showTaskStats && <th>Прогресс</th>}
                             <th>Комментарий</th>
                             <th>Время</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {stats.members.map((m) => (
+                          {(stats.members ?? []).map((m) => (
                             <tr key={m.userId}>
                               <td>
                                 {m.displayName}
@@ -437,12 +765,30 @@ export function GroupAnnouncementsModal({
                               </td>
                               <td>
                                 <span
-                                  className={`pill lc-announcement-status-pill lc-announcement-status-pill--${m.status === 'acknowledged' ? 'ack' : m.status === 'need_more' ? 'need' : 'pending'}`}
+                                  className={`pill lc-announcement-status-pill lc-announcement-status-pill--${
+                                    m.status === 'acknowledged'
+                                      ? 'ack'
+                                      : m.status === 'need_more'
+                                        ? 'need'
+                                        : 'pending'
+                                  }`}
                                 >
                                   {statusLabel(m.status)}
                                 </span>
                               </td>
-                              <td>{m.comment || '—'}</td>
+                              {showTaskStats && (
+                                <td>{taskStatusLabel(m.taskStatus)}</td>
+                              )}
+                              {showTaskStats && (
+                                <td>
+                                  {stats.announcement.kind === 'assignment'
+                                    ? `${m.progress ?? 0}%`
+                                    : stats.linkedTask
+                                      ? `${stats.linkedTask.progress}%`
+                                      : '—'}
+                                </td>
+                              )}
+                              <td>{m.progressNote || m.comment || '—'}</td>
                               <td className="meta">
                                 {m.respondedAt ? formatAnnouncementWhen(m.respondedAt) : '—'}
                               </td>

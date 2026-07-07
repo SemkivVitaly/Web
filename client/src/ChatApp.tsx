@@ -25,7 +25,8 @@ import {
 } from 'react';
 import { flushSync } from 'react-dom';
 import { io, Socket } from 'socket.io-client';
-import { api, apiForm, apiFormWithProgress, getToken, getApiOrigin, resolveUrl } from './api';
+import { api, apiForm, apiFormWithProgress, getToken, getApiOrigin, resolveUrl, resolveAttachmentThumbUrl } from './api';
+import { compressImageFilesForUpload } from './chat/imageCompress';
 import { uiConfirm, uiPrompt } from './ui/dialogs';
 import type {
   User,
@@ -38,13 +39,18 @@ import type {
   ChatLinkIndexItem,
   MessageReactionGroup,
   InvitePolicy,
+  Attachment,
 } from './types';
 import { normalizeLoadedMessage } from './chat/messageNormalize';
+import { ChatImageLightbox, type ChatImageLightboxItem } from './chat/ChatImageLightbox';
+import { capComposerPhotoFiles, MessageImageGrid, MAX_MESSAGE_PHOTOS } from './chat/MessageImageGrid';
+import { PhotoAnnotator } from './chat/PhotoAnnotator';
 import {
   AnnouncementAckModal,
   GroupAnnouncementsModal,
   type GroupAnnouncement,
 } from './chat/AnnouncementModals';
+import { MyAssignmentsBadgeButton, MyAssignmentsPanel } from './chat/MyAssignmentsPanel';
 import {
   readCollabUnlock,
   rememberDocUnlock,
@@ -101,6 +107,7 @@ import {
   IconHeaderSearch,
   canUseInviteInGroupMod,
   mentionQueryAtCursor,
+  mentionAllMatchesAutocompleteQuery,
   hashQueryAtCursor,
   IconMenuPin,
 } from './chat/foundation';
@@ -121,6 +128,8 @@ const TasksPanel = lazy(() =>
 const MESSAGES_PAGE_SIZE = 80;
 
 type ComposerMentionPick = { userId: number; insert: string };
+
+type MentionPickerItem = { kind: 'all' } | { kind: 'user'; user: User };
 
 /** Id упомянутых из списка @: только если соответствующая вставка «Имя, » ещё есть в тексте (по порядку выбора). */
 function mentionUserIdsMatchingBody(picks: readonly ComposerMentionPick[], body: string): number[] {
@@ -144,6 +153,14 @@ function mentionPicksFromStoredIds(ids: number[], groupMembers: User[]): Compose
     out.push({ userId: uid, insert: `${label}, ` });
   }
   return out;
+}
+
+function messageBelongsToChat(m: Message, chat: { kind: 'group' | 'direct'; id: number }): boolean {
+  return chat.kind === 'group' ? m.groupId === chat.id : m.directId === chat.id;
+}
+
+function messagesBelongToChat(messages: Message[], chat: { kind: 'group' | 'direct'; id: number }): boolean {
+  return messages.length > 0 && messages.every((m) => messageBelongsToChat(m, chat));
 }
 
 /** Отступ меню «⋯» от краёв окна при проверке, влезает ли оно снизу / сверху. */
@@ -238,7 +255,19 @@ export default function ChatApp({
   const composerFileInputId = useId();
   const [messageUploadProgress, setMessageUploadProgress] = useState<number | null>(null);
   const messageUploadAbortRef = useRef<AbortController | null>(null);
-  const [chatDocImagePreviewUrl, setChatDocImagePreviewUrl] = useState<string | null>(null);
+  const sendInFlightRef = useRef(false);
+  const forwardInFlightRef = useRef(false);
+  const [imageLightbox, setImageLightbox] = useState<{
+    items: ChatImageLightboxItem[];
+    index: number;
+  } | null>(null);
+  const [photoAnnotator, setPhotoAnnotator] = useState<{
+    src: string;
+    fileName: string;
+    composerIndex?: number;
+    fromLightbox?: boolean;
+    revokeOnClose?: boolean;
+  } | null>(null);
   const [composerDropFiles, setComposerDropFiles] = useState<File[]>([]);
   /** После выбора файла без нового input повторный change часто не срабатывает (тот же путь и т.д.). */
   const [composerFileInputKey, setComposerFileInputKey] = useState(0);
@@ -251,7 +280,11 @@ export default function ChatApp({
     const onPick = () => {
       const list = el.files;
       if (!list?.length) return;
-      setComposerDropFiles((prev) => [...prev, ...Array.from(list)]);
+      setComposerDropFiles((prev) =>
+        capComposerPhotoFiles(prev, Array.from(list), () =>
+          showToast(`Можно прикрепить не больше ${MAX_MESSAGE_PHOTOS} фотографий`)
+        )
+      );
       setComposerFileInputKey((k) => k + 1);
     };
     el.addEventListener('change', onPick);
@@ -369,10 +402,16 @@ export default function ChatApp({
   const [threadPanel, setThreadPanel] = useState<{ rootId: number; messages: Message[] } | null>(null);
   const [threadLoading, setThreadLoading] = useState(false);
   const [chatOnlineOtherIds, setChatOnlineOtherIds] = useState<number[]>([]);
+  const [chatOnlineListOpen, setChatOnlineListOpen] = useState(false);
+  const chatOnlineListRef = useRef<HTMLSpanElement>(null);
   const [typingPeerNames, setTypingPeerNames] = useState<string[]>([]);
   const [pendingAnnouncements, setPendingAnnouncements] = useState<GroupAnnouncement[]>([]);
   const [announcementAckOpen, setAnnouncementAckOpen] = useState(false);
   const [announcementStatsRefreshKey, setAnnouncementStatsRefreshKey] = useState(0);
+  const [assignmentBadges, setAssignmentBadges] = useState<Record<number, number>>({});
+  const [myAssignmentsOpen, setMyAssignmentsOpen] = useState(false);
+  const [myAssignmentsRefreshKey, setMyAssignmentsRefreshKey] = useState(0);
+  const [activeAssignmentCount, setActiveAssignmentCount] = useState(0);
   const [readReceiptsModal, setReadReceiptsModal] = useState<MessageReader[] | null>(null);
   const typingPeersRef = useRef<Map<number, string>>(new Map());
   const typingClearTimersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
@@ -503,6 +542,18 @@ export default function ChatApp({
     }
   }, []);
 
+  const refreshAssignmentBadges = useCallback(async () => {
+    try {
+      const r = await api<{ groups?: unknown }>('/api/chats/assignment-badges');
+      const gRaw = r?.groups;
+      const gObj =
+        gRaw && typeof gRaw === 'object' && !Array.isArray(gRaw) ? (gRaw as Record<string, number>) : {};
+      setAssignmentBadges(Object.fromEntries(Object.entries(gObj).map(([k, v]) => [Number(k), v])));
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   const openThreadForMessage = useCallback(
     async (m: Message) => {
       if (m.chatEvent) return;
@@ -534,8 +585,8 @@ export default function ChatApp({
     setDirects(Array.isArray(d) ? d : []);
     setPrefs(Array.isArray(p) ? p : []);
     listsFetchedOnceRef.current = true;
-    await refreshUnread();
-  }, [refreshUnread]);
+    await Promise.all([refreshUnread(), refreshAssignmentBadges()]);
+  }, [refreshUnread, refreshAssignmentBadges]);
 
   useEffect(() => {
     try {
@@ -545,14 +596,35 @@ export default function ChatApp({
     }
   }, [customChatTabs]);
 
-  useEffect(() => {
-    if (!chatDocImagePreviewUrl) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setChatDocImagePreviewUrl(null);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [chatDocImagePreviewUrl]);
+  const openMessageImageLightbox = useCallback((attachments: Attachment[], attachmentId: number) => {
+    const imgs = attachments.filter((a) => a.kind === 'image');
+    const index = imgs.findIndex((a) => a.id === attachmentId);
+    if (index < 0) return;
+    setImageLightbox({
+      items: imgs.map((a) => ({ url: resolveUrl(a.url), alt: a.fileName })),
+      index,
+    });
+  }, []);
+
+  const openSingleImageLightbox = useCallback((url: string, alt?: string) => {
+    setImageLightbox({ items: [{ url, alt }], index: 0 });
+  }, []);
+
+  const closePhotoAnnotator = useCallback(() => {
+    setPhotoAnnotator((prev) => {
+      if (prev?.revokeOnClose && prev.src.startsWith('blob:')) URL.revokeObjectURL(prev.src);
+      return null;
+    });
+  }, []);
+
+  const openComposerPhotoAnnotator = useCallback((file: File, index: number) => {
+    setPhotoAnnotator({
+      src: URL.createObjectURL(file),
+      fileName: file.name,
+      composerIndex: index,
+      revokeOnClose: true,
+    });
+  }, []);
 
   const refreshFriendState = useCallback(async () => {
     try {
@@ -584,7 +656,7 @@ export default function ChatApp({
     await refreshLists();
     if (active?.kind === 'group') {
       const mem = await api<User[]>(`/api/groups/${active.id}/members`);
-      setMembers(mem);
+      setMembers(Array.isArray(mem) ? mem : []);
     }
   }, [refreshLists, active?.kind, active?.id]);
 
@@ -709,6 +781,8 @@ export default function ChatApp({
     typingPeersRef.current.clear();
     setTypingPeerNames([]);
     setComposerMentionPicks([]);
+    setComposerDropFiles([]);
+    setComposerFileInputKey((k) => k + 1);
   }, [active?.kind, active?.id]);
 
   useEffect(() => {
@@ -977,16 +1051,45 @@ export default function ChatApp({
     const a = activeRef.current;
     if (!a) return;
     try {
-      const msgs =
+      const curMsgs = messagesRef.current;
+      const curMsgsMatchChat =
+        curMsgs.length === 0 ||
+        curMsgs.every((m) =>
+          a.kind === 'group' ? m.groupId === a.id : m.directId === a.id
+        );
+      const maxId =
+        curMsgsMatchChat && curMsgs.length > 0 ? curMsgs[curMsgs.length - 1]!.id : null;
+      const base =
         a.kind === 'group'
-          ? await api<Message[]>(`/api/groups/${a.id}/messages?limit=${MESSAGES_PAGE_SIZE}`)
-          : await api<Message[]>(`/api/direct/${a.id}/messages?limit=${MESSAGES_PAGE_SIZE}`);
-      setMessages(msgs.map(normalizeLoadedMessage));
-      setHasMoreOlderMessages(msgs.length >= MESSAGES_PAGE_SIZE);
-    } catch {
-      /* ignore */
+          ? `/api/groups/${a.id}/messages`
+          : `/api/direct/${a.id}/messages`;
+      const msgs =
+        maxId != null
+          ? await api<Message[]>(`${base}?since=${maxId}&limit=200`)
+          : await api<Message[]>(`${base}?limit=${MESSAGES_PAGE_SIZE}`);
+      if (activeRef.current?.kind !== a.kind || activeRef.current?.id !== a.id) return;
+      if (maxId != null && msgs.length > 0) {
+        setMessages((prev) => {
+          const baseMsgs = prev.every((m) =>
+            a.kind === 'group' ? m.groupId === a.id : m.directId === a.id
+          )
+            ? prev
+            : [];
+          const byId = new Map(baseMsgs.map((m) => [m.id, m]));
+          for (const m of msgs.map(normalizeLoadedMessage)) byId.set(m.id, m);
+          return [...byId.values()].sort((x, y) => x.id - y.id);
+        });
+      } else if (maxId == null) {
+        setMessages(msgs.map(normalizeLoadedMessage));
+        setHasMoreOlderMessages(msgs.length >= MESSAGES_PAGE_SIZE);
+      }
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Не удалось обновить сообщения');
     }
-  }, []);
+  }, [showToast]);
+
+  const reloadActiveMessagesRef = useRef(reloadActiveMessages);
+  reloadActiveMessagesRef.current = reloadActiveMessages;
 
   const loadChatAtMessageId = useCallback(
     async (messageId: number) => {
@@ -1153,11 +1256,11 @@ export default function ChatApp({
             if (!ok) {
               if (needFolder) {
                 const label = (meta.folderName && meta.folderName.trim()) || 'папки';
-                folderPassword = (await uiPrompt(`Пароль папки «${label}»`, { title: 'Требуется пароль' })) || '';
+                folderPassword = (await uiPrompt(`Пароль папки «${label}»`, { title: 'Требуется пароль', localStorageNotice: true })) || '';
                 if (!folderPassword.trim()) return;
               }
               if (needDoc) {
-                docPassword = (await uiPrompt(`Пароль документа «${meta.name}»`, { title: 'Требуется пароль' })) || '';
+                docPassword = (await uiPrompt(`Пароль документа «${meta.name}»`, { title: 'Требуется пароль', localStorageNotice: true })) || '';
                 if (!docPassword.trim()) return;
               }
               if (!(await tryVerify())) {
@@ -1189,7 +1292,7 @@ export default function ChatApp({
           setCollabJumpFromChat(null);
         }
         if (meta.previewImageUrl && meta.imageDocument) {
-          setChatDocImagePreviewUrl(resolveUrl(meta.previewImageUrl));
+          openSingleImageLightbox(resolveUrl(meta.previewImageUrl));
           return;
         }
         setOpenCollabDocId(docId);
@@ -1198,7 +1301,7 @@ export default function ChatApp({
         showToast(e instanceof Error ? e.message : 'Не удалось открыть документ');
       }
     },
-    [active, groups, showToast]
+    [active, groups, openSingleImageLightbox, showToast]
   );
 
   const openLinkedTaskFromChat = useCallback(
@@ -1238,7 +1341,7 @@ export default function ChatApp({
             }
           }
           if (!verified) {
-            pw = (await uiPrompt(`Пароль доски «${meta.boardName}»`, { title: 'Требуется пароль' })) || '';
+            pw = (await uiPrompt(`Пароль доски «${meta.boardName}»`, { title: 'Требуется пароль', localStorageNotice: true })) || '';
             if (!pw.trim()) return;
             try {
               await api(`/api/task-boards/${meta.boardId}/verify-password`, {
@@ -1341,7 +1444,7 @@ export default function ChatApp({
       const t = e.target as HTMLElement;
       if (
         t.closest(
-          'button, a, input, textarea, label, [role="menuitem"], .lc-msg-toolbar, .lc-msg-menu, .lc-msg-forward-flyout, .lc-msg-attach-flyout, .lc-select-forward-flyout, .lc-msg-select-cell, audio, video'
+          'button, a, input, textarea, label, select, [role="menuitem"], [role="listbox"], .lc-msg-toolbar, .lc-msg-menu, .lc-msg-forward-flyout, .lc-msg-attach-flyout, .lc-select-forward-flyout, .lc-msg-select-cell, .lc-reaction-picker-wrap, .lc-reaction-picker, .lc-reaction-pill, audio, video, .lc-chat-attach-img--clickable'
         )
       ) {
         return;
@@ -1457,6 +1560,9 @@ export default function ChatApp({
         directsRef.current,
         null
       );
+      void reloadActiveMessagesRef.current();
+      void refreshListsRef.current?.();
+      void refreshUnreadRef.current?.();
     });
     s.on('disconnect', () => {
       setSocketConnected(false);
@@ -1503,11 +1609,16 @@ export default function ChatApp({
       const isSameDirect = cur?.kind === 'direct' && msg.directId === cur.id;
       const isSameChat = isSameGroup || isSameDirect;
       /** Сообщения этой группы/диалога подгружаем, пока чат выбран в сайдбаре (в т.ч. документы/задачи). */
-      if (isSameChat) {
-        setMessages((prev) => [
-          ...prev.filter((x) => x.id !== msg.id),
-          normalizeLoadedMessage(msg),
-        ]);
+      if (isSameChat && cur && messageBelongsToChat(msg, cur)) {
+        setMessages((prev) => {
+          if (prev.length > 0 && !prev.every((m) => messageBelongsToChat(m, cur))) {
+            return [normalizeLoadedMessage(msg)];
+          }
+          return [
+            ...prev.filter((x) => x.id !== msg.id),
+            normalizeLoadedMessage(msg),
+          ];
+        });
       }
       if (msg.sender.id === meRef.current.id) return;
       /** Уведомления и счётчик «непрочитано» только если пользователь не на ленте этого чата. */
@@ -1903,6 +2014,10 @@ export default function ChatApp({
       setLoadingOlderMessages(false);
       return;
     }
+    setMessages([]);
+    setHasMoreOlderMessages(false);
+    loadingOlderRef.current = false;
+    setLoadingOlderMessages(false);
     // Гард от гонки при быстром переключении чатов: пины/участники для *предыдущего* чата не должны
     // затирать состояние нового active. Без этого «прилипал» список участников прошлой группы.
     let cancelled = false;
@@ -1924,7 +2039,7 @@ export default function ChatApp({
       if (active.kind === 'group') {
         try {
           const mem = await api<User[]>(`/api/groups/${active.id}/members`);
-          if (!cancelled) setMembers(mem);
+          if (!cancelled) setMembers(Array.isArray(mem) ? mem : []);
         } catch {
           if (!cancelled) setMembers([]);
         }
@@ -1943,6 +2058,18 @@ export default function ChatApp({
             setAnnouncementAckOpen(false);
           }
         }
+        try {
+          const open = await api<GroupAnnouncement[]>(
+            `/api/groups/${active.id}/announcements/my-assignments`
+          );
+          if (!cancelled) {
+            const list = Array.isArray(open) ? open : [];
+            setActiveAssignmentCount(list.length);
+          }
+        } catch {
+          if (!cancelled) setActiveAssignmentCount(0);
+        }
+        void refreshAssignmentBadges();
       } else {
         setMembers([]);
         setPendingAnnouncements([]);
@@ -1952,7 +2079,7 @@ export default function ChatApp({
     return () => {
       cancelled = true;
     };
-  }, [active, reloadActiveMessages, loadChatAtMessageId]);
+  }, [active, reloadActiveMessages, loadChatAtMessageId, refreshAssignmentBadges]);
 
   useEffect(() => {
     setMentionSuppressKey(null);
@@ -2042,44 +2169,70 @@ export default function ChatApp({
     const onAnnouncementNew = (p: GroupAnnouncement) => {
       const cur = activeRef.current;
       if (cur?.kind !== 'group' || cur.id !== p.groupId) return;
+      if (
+        p.audience === 'selected' &&
+        Array.isArray(p.recipients) &&
+        !p.recipients.some((r) => r.id === me.id)
+      ) {
+        return;
+      }
       setPendingAnnouncements((prev) => {
         if (prev.some((x) => x.id === p.id)) return prev;
         return [...prev, p];
       });
       setAnnouncementAckOpen(true);
+      void refreshAssignmentBadges();
     };
     const onAnnouncementResponded = (p: { announcementId: number; groupId: number }) => {
       const cur = activeRef.current;
       if (cur?.kind !== 'group' || cur.id !== p.groupId) return;
       setAnnouncementStatsRefreshKey((k) => k + 1);
+      setMyAssignmentsRefreshKey((k) => k + 1);
+      void refreshAssignmentBadges();
+    };
+    const onAnnouncementProgress = (p: { groupId: number }) => {
+      const cur = activeRef.current;
+      if (cur?.kind !== 'group' || cur.id !== p.groupId) return;
+      setAnnouncementStatsRefreshKey((k) => k + 1);
+      setMyAssignmentsRefreshKey((k) => k + 1);
+      void refreshAssignmentBadges();
     };
     s.on('announcement:new', onAnnouncementNew);
     s.on('announcement:responded', onAnnouncementResponded);
+    s.on('announcement:progress', onAnnouncementProgress);
     return () => {
       s.off('announcement:new', onAnnouncementNew);
       s.off('announcement:responded', onAnnouncementResponded);
+      s.off('announcement:progress', onAnnouncementProgress);
     };
-  }, [ioSocket]);
+  }, [ioSocket, me.id, refreshAssignmentBadges]);
 
   useEffect(() => {
     if (!active || messages.length === 0) return;
     if (active.kind === 'group' && groupTab !== 'chat') return;
+    if (!messagesBelongToChat(messages, active)) return;
+    const chatKind = active.kind;
+    const chatId = active.id;
     const maxId = Math.max(...messages.map((m) => m.id));
+    const maxMsg = messages.find((m) => m.id === maxId);
+    if (!maxMsg || !messageBelongsToChat(maxMsg, active)) return;
     const t = setTimeout(() => {
       void (async () => {
+        const cur = activeRef.current;
+        if (!cur || cur.kind !== chatKind || cur.id !== chatId) return;
         try {
           await api('/api/chats/read', {
             method: 'POST',
-            json: { chatKind: active.kind, chatId: active.id, upToMessageId: maxId },
+            json: { chatKind, chatId, upToMessageId: maxId },
           });
           await refreshUnread();
-        } catch {
-          /* ignore */
+        } catch (e) {
+          showToast(e instanceof Error ? e.message : 'Не удалось отметить прочитанным');
         }
       })();
     }, 320);
     return () => clearTimeout(t);
-  }, [active, messages, groupTab, refreshUnread]);
+  }, [active, messages, groupTab, refreshUnread, showToast]);
 
   useEffect(() => {
     stickToBottomRef.current = true;
@@ -2225,6 +2378,10 @@ export default function ChatApp({
     if (isChatMutedPrefs(prefs, 'group', id)) return 0;
     if (active?.kind === 'group' && active.id === id && groupTab === 'chat') return 0;
     return unread.groups[id] ?? 0;
+  }
+  function assignmentBadgeForGroup(id: number) {
+    if (active?.kind === 'group' && active.id === id) return 0;
+    return assignmentBadges[id] ?? 0;
   }
   function unreadForDirect(id: number) {
     if (isChatMutedPrefs(prefs, 'direct', id)) return 0;
@@ -2381,7 +2538,9 @@ export default function ChatApp({
   }
 
   async function sendMessage() {
-    if (!active) return;
+    if (sendInFlightRef.current) return;
+    const sendChat = activeRef.current;
+    if (!sendChat) return;
     if (editingMessage) {
       const editTrim = text.trim();
       const hasForwardBlock = !!(editingMessage.forwardFrom && editingMessage.forwardFrom.length > 0);
@@ -2389,10 +2548,11 @@ export default function ChatApp({
         showToast('Нельзя сохранить пустое сообщение');
         return;
       }
+      sendInFlightRef.current = true;
       try {
         const editJson: { body: string; mentionUserIds?: number[] } = { body: text };
         const mentionIdsForEdit =
-          active.kind === 'group'
+          sendChat.kind === 'group'
             ? mentionUserIdsMatchingBody(composerMentionPicks, text.trim())
             : [];
         if (mentionIdsForEdit.length > 0) {
@@ -2412,40 +2572,62 @@ export default function ChatApp({
         setHashSuppressKey(null);
       } catch (e) {
         showToast(e instanceof Error ? e.message : 'Не удалось сохранить');
+      } finally {
+        sendInFlightRef.current = false;
       }
       return;
     }
     const trimmed = text.trim();
-    const allFiles = [...composerDropFiles];
-    const workspaceLinksToAttach =
-      active.kind === 'group' ? [...composerWorkspaceLinks] : [];
-    if (!trimmed && allFiles.length === 0 && workspaceLinksToAttach.length === 0) {
+    const filesSnapshot = [...composerDropFiles];
+    const mentionPicksSnapshot = [...composerMentionPicks];
+    const replySnapshot = replyingTo;
+    const workspaceLinksSnapshot =
+      sendChat.kind === 'group' ? [...composerWorkspaceLinks] : [];
+    sendInFlightRef.current = true;
+    let allFiles: File[];
+    try {
+      allFiles = await compressImageFilesForUpload(filesSnapshot);
+    } catch (e) {
+      sendInFlightRef.current = false;
+      showToast(e instanceof Error ? e.message : 'Не удалось подготовить файлы');
+      return;
+    }
+    const photoCount = allFiles.filter((f) => f.type.startsWith('image/')).length;
+    if (photoCount > MAX_MESSAGE_PHOTOS) {
+      sendInFlightRef.current = false;
+      showToast(`Можно прикрепить не больше ${MAX_MESSAGE_PHOTOS} фотографий`);
+      return;
+    }
+    if (!trimmed && allFiles.length === 0 && workspaceLinksSnapshot.length === 0) {
+      sendInFlightRef.current = false;
       showToast('Введите текст, прикрепите файл или привяжите задачу/документ (#)');
       return;
     }
     const fd = new FormData();
     fd.append('body', trimmed);
     const mentionIdsForSend =
-      active.kind === 'group' ? mentionUserIdsMatchingBody(composerMentionPicks, trimmed) : [];
+      sendChat.kind === 'group'
+        ? mentionUserIdsMatchingBody(mentionPicksSnapshot, trimmed)
+        : [];
     if (mentionIdsForSend.length > 0) {
       fd.append('mentionUserIds', JSON.stringify(mentionIdsForSend));
     }
-    if (workspaceLinksToAttach.length > 0) {
+    if (workspaceLinksSnapshot.length > 0) {
       fd.append(
         'workspaceLinks',
         JSON.stringify(
-          workspaceLinksToAttach.map((l) => ({ kind: l.kind, entityId: l.entityId }))
+          workspaceLinksSnapshot.map((l) => ({ kind: l.kind, entityId: l.entityId }))
         )
       );
     }
-    if (replyingTo) fd.append('replyToId', String(replyingTo.id));
+    if (replySnapshot) fd.append('replyToId', String(replySnapshot.id));
     for (const f of allFiles) {
       fd.append('files', f);
     }
     const url =
-      active.kind === 'group'
-        ? `/api/groups/${active.id}/messages`
-        : `/api/direct/${active.id}/messages`;
+      sendChat.kind === 'group'
+        ? `/api/groups/${sendChat.id}/messages`
+        : `/api/direct/${sendChat.id}/messages`;
     let created: Message;
     try {
       if (allFiles.length > 0) {
@@ -2468,12 +2650,14 @@ export default function ChatApp({
       if (e instanceof Error && e.message === 'Отменено') return;
       showToast(e instanceof Error ? e.message : 'Не удалось отправить');
       return;
+    } finally {
+      sendInFlightRef.current = false;
     }
     const line = previewMessageLine(created);
-    if (active.kind === 'group') {
+    if (sendChat.kind === 'group') {
       setGroups((prev) =>
         prev.map((g) =>
-          g.id === active.id
+          g.id === sendChat.id
             ? { ...g, lastMessagePreview: line, lastMessageAt: created.createdAt }
             : g
         )
@@ -2481,17 +2665,17 @@ export default function ChatApp({
     } else {
       setDirects((prev) =>
         prev.map((d) =>
-          d.id === active.id
+          d.id === sendChat.id
             ? { ...d, lastMessagePreview: line, lastMessageAt: created.createdAt }
             : d
         )
       );
     }
-    if (active.kind === 'group' && workspaceLinksToAttach.length > 0) {
+    if (sendChat.kind === 'group' && workspaceLinksSnapshot.length > 0) {
       const mergedWs = normalizeLoadedMessage(created).workspaceLinks ?? [];
-      if (mergedWs.length < workspaceLinksToAttach.length) {
+      if (mergedWs.length < workspaceLinksSnapshot.length) {
         let cur = mergedWs;
-        for (const link of workspaceLinksToAttach) {
+        for (const link of workspaceLinksSnapshot) {
           try {
             const r = await api<{ workspaceLinks: MessageWorkspaceLink[] }>(
               `/api/messages/${created.id}/workspace-links`,
@@ -2510,17 +2694,21 @@ export default function ChatApp({
         patchMessageWorkspaceLinks(created.id, mergedWs);
       }
     }
-    setText('');
-    setComposerCaret(0);
-    setComposerMentionPicks([]);
-    setMentionSuppressKey(null);
-    setHashSuppressKey(null);
-    setHashPickerSuppressAfterPick(false);
-    setComposerWorkspaceLinks([]);
-    setReplyingTo(null);
-    setEmojiOpen(false);
-    setComposerDropFiles([]);
-    setComposerFileInputKey((k) => k + 1);
+    const stillOnSendChat =
+      activeRef.current?.kind === sendChat.kind && activeRef.current?.id === sendChat.id;
+    if (stillOnSendChat) {
+      setText('');
+      setComposerCaret(0);
+      setComposerMentionPicks([]);
+      setMentionSuppressKey(null);
+      setHashSuppressKey(null);
+      setHashPickerSuppressAfterPick(false);
+      setComposerWorkspaceLinks([]);
+      setReplyingTo(null);
+      setEmojiOpen(false);
+      setComposerDropFiles([]);
+      setComposerFileInputKey((k) => k + 1);
+    }
   }
 
   async function toggleMessagePin(m: Message) {
@@ -2596,43 +2784,105 @@ export default function ChatApp({
     }
   }
 
+  function applyForwardToChat(created: Message, target: Active) {
+    const normalized = normalizeLoadedMessage(created);
+    const line = previewMessageLine(normalized);
+    if (target.kind === 'group') {
+      setGroups((prev) =>
+        prev.map((g) =>
+          g.id === target.id
+            ? { ...g, lastMessagePreview: line, lastMessageAt: normalized.createdAt }
+            : g
+        )
+      );
+    } else {
+      setDirects((prev) =>
+        prev.map((d) =>
+          d.id === target.id
+            ? { ...d, lastMessagePreview: line, lastMessageAt: normalized.createdAt }
+            : d
+        )
+      );
+    }
+    const cur = activeRef.current;
+    if (
+      cur &&
+      cur.kind === target.kind &&
+      cur.id === target.id &&
+      messageBelongsToChat(normalized, cur)
+    ) {
+      setMessages((prev) => {
+        const base = prev.every((m) => messageBelongsToChat(m, cur)) ? prev : [];
+        return [
+          ...base.filter((x) => x.id !== normalized.id),
+          normalized,
+        ];
+      });
+    }
+  }
+
+  function closeForwardUi() {
+    setForwardFromMessage(null);
+    setForwardSubmenuOpen(false);
+    setSelectForwardOpen(false);
+    setFileAttachSubmenu(null);
+    setMessageMenuOpen(null);
+  }
+
   async function forwardTo(messageId: number, targetKind: 'group' | 'direct', targetId: number) {
+    if (forwardInFlightRef.current) return;
+    const target: Active = { kind: targetKind, id: targetId };
+    forwardInFlightRef.current = true;
     try {
-      await api(`/api/messages/${messageId}/forward`, {
+      const created = await api<Message>(`/api/messages/${messageId}/forward`, {
         method: 'POST',
         json: { targetKind, targetId },
       });
-      setForwardFromMessage(null);
-      setForwardSubmenuOpen(false);
-      setFileAttachSubmenu(null);
-      setMessageMenuOpen(null);
+      applyForwardToChat(created, target);
+      closeForwardUi();
       showToast('Сообщение переслано');
     } catch (e) {
       showToast(e instanceof Error ? e.message : 'Не удалось переслать');
+    } finally {
+      forwardInFlightRef.current = false;
     }
   }
 
   async function forwardBatchTo(targetKind: 'group' | 'direct', targetId: number) {
+    if (forwardInFlightRef.current) return;
+    const target: Active = { kind: targetKind, id: targetId };
+    const sourceChat = activeRef.current;
     const ids = Object.keys(selectedMessageIds)
       .filter((k) => selectedMessageIds[+k])
       .map(Number)
       .sort((a, b) => a - b);
     if (!ids.length) return;
+    if (sourceChat) {
+      const msgMap = new Map(messagesRef.current.map((m) => [m.id, m]));
+      const allFromSource = ids.every((id) => {
+        const m = msgMap.get(id);
+        return m && messageBelongsToChat(m, sourceChat);
+      });
+      if (!allFromSource) {
+        showToast('Выберите сообщения только из текущего чата');
+        return;
+      }
+    }
+    forwardInFlightRef.current = true;
     try {
-      await api('/api/messages/forward-batch', {
+      const created = await api<Message>('/api/messages/forward-batch', {
         method: 'POST',
         json: { messageIds: ids, targetKind, targetId },
       });
-      setSelectForwardOpen(false);
-      setForwardSubmenuOpen(false);
-      setForwardFromMessage(null);
-      setFileAttachSubmenu(null);
+      applyForwardToChat(created, target);
+      closeForwardUi();
       setSelectMode(false);
       setSelectedMessageIds({});
-      setMessageMenuOpen(null);
       showToast(ids.length > 1 ? `Переслано сообщений: ${ids.length}` : 'Сообщение переслано');
     } catch (e) {
       showToast(e instanceof Error ? e.message : 'Не удалось переслать');
+    } finally {
+      forwardInFlightRef.current = false;
     }
   }
 
@@ -2649,10 +2899,7 @@ export default function ChatApp({
     if (!exitChatModal) return;
     try {
       if (exitChatModal.kind === 'leave-group') {
-        await api(`/api/groups/${exitChatModal.groupId}/leave`, {
-          method: 'POST',
-          json: { deleteMyMessages: exitDeleteMyMessages },
-        });
+        await api(`/api/groups/${exitChatModal.groupId}/leave`, { method: 'POST' });
         setActive((cur) =>
           cur?.kind === 'group' && cur.id === exitChatModal.groupId ? null : cur
         );
@@ -2712,6 +2959,18 @@ export default function ChatApp({
       .slice(0, 10);
   }, [mentionAnchorForPicker, members, me.id]);
 
+  const mentionAllInPicker = useMemo(() => {
+    if (!mentionAnchorForPicker) return false;
+    return mentionAllMatchesAutocompleteQuery(mentionAnchorForPicker.query);
+  }, [mentionAnchorForPicker]);
+
+  const mentionPickerItems = useMemo((): MentionPickerItem[] => {
+    const items: MentionPickerItem[] = [];
+    if (mentionAllInPicker) items.push({ kind: 'all' });
+    for (const u of mentionCandidates) items.push({ kind: 'user', user: u });
+    return items;
+  }, [mentionAllInPicker, mentionCandidates]);
+
   const hashTaskCandidates = useMemo(() => {
     if (!hashAnchorForPicker || hashPickerTab !== 'task') return [];
     const q = hashAnchorForPicker.query.toLowerCase().trim();
@@ -2734,7 +2993,7 @@ export default function ChatApp({
     mentionAnchorForPicker != null &&
     (mentionSuppressKey == null ||
       mentionSuppressKey !== `${mentionAnchorForPicker.start}\t${mentionAnchorForPicker.query}`) &&
-    (mentionCandidates.length > 0 || mentionAnchorForPicker.query.length > 0);
+    mentionPickerItems.length > 0;
 
   const hashPickerVisible =
     active?.kind === 'group' &&
@@ -2745,12 +3004,12 @@ export default function ChatApp({
       hashSuppressKey !== `${hashAnchorForPicker.start}\t${hashAnchorForPicker.query}`);
 
   useEffect(() => {
-    if (mentionCandidates.length === 0) {
+    if (mentionPickerItems.length === 0) {
       setMentionPickIdx(0);
       return;
     }
-    setMentionPickIdx((i) => Math.min(i, mentionCandidates.length - 1));
-  }, [mentionCandidates.length]);
+    setMentionPickIdx((i) => Math.min(i, mentionPickerItems.length - 1));
+  }, [mentionPickerItems.length]);
 
   useEffect(() => {
     if (hashCandidates.length === 0) {
@@ -2759,6 +3018,24 @@ export default function ChatApp({
     }
     setHashPickIdx((i) => Math.min(i, hashCandidates.length - 1));
   }, [hashCandidates.length]);
+
+  const applyMentionAllChoice = useCallback(() => {
+    const anchor = mentionQueryAtCursor(text, composerCaret);
+    if (!anchor) return;
+    const insert = '@all ';
+    const next = text.slice(0, anchor.start) + insert + text.slice(composerCaret);
+    setText(next);
+    const pos = anchor.start + insert.length;
+    setComposerCaret(pos);
+    setMentionSuppressKey(null);
+    requestAnimationFrame(() => {
+      const ta = composerTextareaRef.current;
+      if (ta) {
+        ta.focus();
+        ta.setSelectionRange(pos, pos);
+      }
+    });
+  }, [text, composerCaret]);
 
   const applyMentionChoice = useCallback(
     (u: User) => {
@@ -2927,6 +3204,31 @@ export default function ChatApp({
   }, [chatHeaderMenuOpen]);
 
   useEffect(() => {
+    setChatOnlineListOpen(false);
+  }, [active?.kind, active?.id]);
+
+  useEffect(() => {
+    if (chatOnlineOtherIds.length === 0) setChatOnlineListOpen(false);
+  }, [chatOnlineOtherIds.length]);
+
+  useEffect(() => {
+    if (!chatOnlineListOpen) return;
+    const onDown = (e: MouseEvent) => {
+      const el = chatOnlineListRef.current;
+      if (el && !el.contains(e.target as Node)) setChatOnlineListOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setChatOnlineListOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [chatOnlineListOpen]);
+
+  useEffect(() => {
     if (!attachmentsModalOpen || !active) return;
     let cancelled = false;
     (async () => {
@@ -2934,8 +3236,8 @@ export default function ChatApp({
       try {
         const path =
           active.kind === 'group'
-            ? `/api/groups/${active.id}/chat-attachments`
-            : `/api/direct/${active.id}/chat-attachments`;
+            ? `/api/groups/${active.id}/chat-attachments?limit=200&linkLimit=100`
+            : `/api/direct/${active.id}/chat-attachments?limit=200&linkLimit=100`;
         const data = await api<{ attachments: ChatAttachmentIndexItem[]; links: ChatLinkIndexItem[] }>(path);
         if (!cancelled)
           setAttachmentIndex({
@@ -2957,6 +3259,24 @@ export default function ChatApp({
   }, [attachmentsModalOpen, active?.kind, active?.id, showToast]);
 
   const activeDirect = active?.kind === 'direct' ? directs.find((d) => d.id === active.id) : null;
+
+  const chatOnlineUsers = useMemo(() => {
+    if (!chatOnlineOtherIds.length) return [];
+    const fallbackUser = (id: number): User => ({
+      id,
+      username: '',
+      displayName: `Участник #${id}`,
+      tag: String(id),
+      avatarUrl: null,
+    });
+    if (active?.kind === 'direct') {
+      const peer = activeDirect?.peer;
+      if (peer && chatOnlineOtherIds.includes(peer.id)) return [peer];
+      return chatOnlineOtherIds.map(fallbackUser);
+    }
+    const byId = new Map(members.map((m) => [m.id, m]));
+    return chatOnlineOtherIds.map((id) => byId.get(id) ?? fallbackUser(id));
+  }, [chatOnlineOtherIds, members, active?.kind, activeDirect]);
 
   const chatMuted =
     !!active && isChatMutedPrefs(prefs, active.kind, active.id);
@@ -2980,6 +3300,7 @@ export default function ChatApp({
       <div className={`app-shell${active ? ' lc-mobile-detail' : ' lc-mobile-list'}`}>
       <div className="app-shell-top">
       <aside className="sidebar">
+        <div className="lc-sidebar-head">
         <h2>Чаты</h2>
         <div className="lc-sidebar-desktop-only">
           <div className="lc-sidebar-toolbar">
@@ -3052,6 +3373,7 @@ export default function ChatApp({
           <div className="lc-sidebar-divider" aria-hidden>
             —
           </div>
+        </div>
         </div>
         <div className="chat-list lc-chat-list--tabs">
           <div className="lc-chat-tabs lc-chat-tabs--scroll" role="tablist" aria-label="Тип чатов">
@@ -3196,7 +3518,7 @@ export default function ChatApp({
                           <div className="lc-chat-sidebar-name-row">
                             <span className="lc-chat-sidebar-name">
                               {g.name}
-                              <span className="pill">{g.role}</span>
+                              <span className="pill">{groupRoleLabel(g.role)}</span>
                               {g.hasPassword ? (
                                 <span className="lc-chat-lock" title="Группа с паролем" aria-hidden>
                                   {' '}
@@ -3215,6 +3537,14 @@ export default function ChatApp({
                             aria-label={`Непрочитано: ${unreadForGroup(g.id)}`}
                           >
                             {unreadForGroup(g.id) > 99 ? '99+' : unreadForGroup(g.id)}
+                          </span>
+                        ) : assignmentBadgeForGroup(g.id) > 0 ? (
+                          <span
+                            className="lc-sidebar-assignment-badge"
+                            aria-label={`Назначения: ${assignmentBadgeForGroup(g.id)}`}
+                            title="Есть уведомления или назначения"
+                          >
+                            {assignmentBadgeForGroup(g.id) > 99 ? '99+' : assignmentBadgeForGroup(g.id)}
                           </span>
                         ) : null}
                       </div>
@@ -3388,7 +3718,7 @@ export default function ChatApp({
                               <div className="lc-chat-sidebar-name-row">
                                 <span className="lc-chat-sidebar-name">
                                   {g.name}
-                                  <span className="pill">{g.role}</span>
+                                  <span className="pill">{groupRoleLabel(g.role)}</span>
                                   {g.hasPassword ? (
                                     <span className="lc-chat-lock" title="Группа с паролем" aria-hidden>
                                       {' '}
@@ -3407,6 +3737,14 @@ export default function ChatApp({
                                 aria-label={`Непрочитано: ${unreadForGroup(g.id)}`}
                               >
                                 {unreadForGroup(g.id) > 99 ? '99+' : unreadForGroup(g.id)}
+                              </span>
+                            ) : assignmentBadgeForGroup(g.id) > 0 ? (
+                              <span
+                                className="lc-sidebar-assignment-badge"
+                                aria-label={`Назначения: ${assignmentBadgeForGroup(g.id)}`}
+                                title="Есть уведомления или назначения"
+                              >
+                                {assignmentBadgeForGroup(g.id) > 99 ? '99+' : assignmentBadgeForGroup(g.id)}
                               </span>
                             ) : null}
                           </div>
@@ -3595,8 +3933,16 @@ export default function ChatApp({
                       style={{ marginLeft: 8 }}
                       onClick={() => setModal('groupAnnouncements')}
                     >
-                      Объявления
+                      Уведомления
                     </button>
+                  )}
+                  {activeGroup && (
+                    <span style={{ marginLeft: 8 }}>
+                      <MyAssignmentsBadgeButton
+                        count={pendingAnnouncements.length + activeAssignmentCount}
+                        onClick={() => setMyAssignmentsOpen(true)}
+                      />
+                    </span>
                   )}
                   <div className="lc-group-tabs">
                     <button
@@ -3676,7 +4022,39 @@ export default function ChatApp({
                     {(chatOnlineOtherIds.length > 0 || typingPeerNames.length > 0) && (
                       <div className="lc-chat-messenger-presence">
                         {chatOnlineOtherIds.length > 0 && (
-                          <span>В сети (другие вкладки/устройства): {chatOnlineOtherIds.length}</span>
+                          <span className="lc-chat-online-presence-wrap" ref={chatOnlineListRef}>
+                            <button
+                              type="button"
+                              className="lc-chat-online-presence-btn"
+                              aria-expanded={chatOnlineListOpen}
+                              aria-haspopup="listbox"
+                              title="Показать, кто в сети"
+                              onClick={() => setChatOnlineListOpen((o) => !o)}
+                            >
+                              В сети: {chatOnlineOtherIds.length}
+                            </button>
+                            {chatOnlineListOpen && (
+                              <ul className="lc-chat-online-list" role="listbox" aria-label="В сети">
+                                {chatOnlineUsers.map((u) => (
+                                  <li key={u.id} className="lc-chat-online-list-item" role="option">
+                                    <span className="lc-chat-online-list-avatar" aria-hidden>
+                                      {u.avatarUrl ? (
+                                        <img src={resolveUrl(u.avatarUrl)} alt="" />
+                                      ) : (
+                                        <span className="lc-chat-online-list-avatar-fallback">
+                                          {(u.displayName || u.tag).slice(0, 1).toUpperCase()}
+                                        </span>
+                                      )}
+                                    </span>
+                                    <span className="lc-chat-online-list-name">
+                                      {(u.displayName || '').trim() || u.tag}
+                                      <span className="lc-chat-online-list-tag"> @{u.tag}</span>
+                                    </span>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </span>
                         )}
                         {typingPeerNames.length > 0 && (
                           <span>
@@ -3996,8 +4374,14 @@ export default function ChatApp({
                     )}
                     {canMod && (
                       <button type="button" onClick={() => setModal('groupAnnouncements')}>
-                        Объявления
+                        Уведомления
                       </button>
+                    )}
+                    {activeGroup && (
+                      <MyAssignmentsBadgeButton
+                        count={pendingAnnouncements.length + activeAssignmentCount}
+                        onClick={() => setMyAssignmentsOpen(true)}
+                      />
                     )}
                     <div className="lc-group-tabs lc-group-tabs--in-toolbar">
                       <button
@@ -4705,11 +5089,19 @@ export default function ChatApp({
                         : m.body}
                     </div>
                   )}
-                  {m.attachments.map((a) => (
+                  {m.attachments.some((a) => a.kind === 'image') && (
+                    <MessageImageGrid
+                      images={m.attachments.filter((a) => a.kind === 'image')}
+                      allAttachments={m.attachments}
+                      resolveUrl={resolveUrl}
+                      resolveImageUrl={resolveAttachmentThumbUrl}
+                      onOpenImage={openMessageImageLightbox}
+                    />
+                  )}
+                  {m.attachments
+                    .filter((a) => a.kind !== 'image')
+                    .map((a) => (
                     <div key={a.id}>
-                      {a.kind === 'image' && (
-                        <img className="attach" src={resolveUrl(a.url)} alt={a.fileName} />
-                      )}
                       {a.kind === 'video' && <video src={resolveUrl(a.url)} controls />}
                       {(a.kind === 'audio' || a.kind === 'voice') && (
                         <audio src={resolveUrl(a.url)} controls />
@@ -4793,7 +5185,10 @@ export default function ChatApp({
                       </button>
                     ))}
                     {!selectMode && (
-                      <div className="lc-reaction-picker-wrap">
+                      <div
+                        className="lc-reaction-picker-wrap"
+                        onPointerDown={(e) => e.stopPropagation()}
+                      >
                         <button
                           type="button"
                           className="lc-reaction-add"
@@ -4891,11 +5286,19 @@ export default function ChatApp({
                           </button>
                         </div>
                         {tm.body ? <div className="body">{tm.body}</div> : null}
-                        {(tm.attachments ?? []).map((a) => (
+                        {(tm.attachments ?? []).some((a) => a.kind === 'image') && (
+                          <MessageImageGrid
+                            images={(tm.attachments ?? []).filter((a) => a.kind === 'image')}
+                            allAttachments={tm.attachments ?? []}
+                            resolveUrl={resolveUrl}
+                            resolveImageUrl={resolveAttachmentThumbUrl}
+                            onOpenImage={openMessageImageLightbox}
+                          />
+                        )}
+                        {(tm.attachments ?? [])
+                          .filter((a) => a.kind !== 'image')
+                          .map((a) => (
                           <div key={a.id}>
-                            {a.kind === 'image' && (
-                              <img className="attach" src={resolveUrl(a.url)} alt={a.fileName} />
-                            )}
                             {a.kind === 'video' && <video src={resolveUrl(a.url)} controls />}
                             {(a.kind === 'audio' || a.kind === 'voice') && (
                               <audio src={resolveUrl(a.url)} controls />
@@ -5088,7 +5491,13 @@ export default function ChatApp({
                   if (![...e.dataTransfer.types].includes('Files')) return;
                   e.preventDefault();
                   const fl = [...(e.dataTransfer.files || [])];
-                  if (fl.length) setComposerDropFiles((prev) => [...prev, ...fl]);
+                  if (fl.length) {
+                    setComposerDropFiles((prev) =>
+                      capComposerPhotoFiles(prev, fl, () =>
+                        showToast(`Можно прикрепить не больше ${MAX_MESSAGE_PHOTOS} фотографий`)
+                      )
+                    );
+                  }
                 }}
               >
               <div className="lc-composer-field-wrap">
@@ -5197,7 +5606,7 @@ export default function ChatApp({
                               onDoubleClick={(ev) => {
                                 ev.preventDefault();
                                 if (d.previewImageUrl)
-                                  setChatDocImagePreviewUrl(resolveUrl(d.previewImageUrl));
+                                  openSingleImageLightbox(resolveUrl(d.previewImageUrl));
                               }}
                             >
                               {d.previewImageUrl ? (
@@ -5229,33 +5638,54 @@ export default function ChatApp({
                     role="listbox"
                     aria-label="Упомянуть участника"
                   >
-                    {mentionCandidates.length === 0 ? (
+                    {mentionPickerItems.length === 0 ? (
                       <div className="lc-mention-picker-empty">Нет совпадений</div>
                     ) : (
-                      mentionCandidates.map((u, idx) => (
-                        <button
-                          key={u.id}
-                          type="button"
-                          role="option"
-                          aria-selected={idx === mentionPickIdx}
-                          className={`lc-mention-picker-row${idx === mentionPickIdx ? ' lc-mention-picker-row--active' : ''}`}
-                          onMouseDown={(ev) => ev.preventDefault()}
-                          onMouseEnter={() => setMentionPickIdx(idx)}
-                          onClick={() => applyMentionChoice(u)}
-                        >
-                          <div className="lc-mention-picker-avatar" aria-hidden>
-                            {u.avatarUrl ? (
-                              <img src={resolveUrl(u.avatarUrl)} alt="" />
-                            ) : (
-                              <span>{u.displayName.slice(0, 1).toUpperCase()}</span>
-                            )}
-                          </div>
-                          <div className="lc-mention-picker-text">
-                            <div className="lc-mention-picker-name">{u.displayName}</div>
-                            <div className="lc-mention-picker-tag">@{u.tag}</div>
-                          </div>
-                        </button>
-                      ))
+                      mentionPickerItems.map((item, idx) =>
+                        item.kind === 'all' ? (
+                          <button
+                            key="all"
+                            type="button"
+                            role="option"
+                            aria-selected={idx === mentionPickIdx}
+                            className={`lc-mention-picker-row lc-mention-picker-row--all${idx === mentionPickIdx ? ' lc-mention-picker-row--active' : ''}`}
+                            onMouseDown={(ev) => ev.preventDefault()}
+                            onMouseEnter={() => setMentionPickIdx(idx)}
+                            onClick={() => applyMentionAllChoice()}
+                          >
+                            <div className="lc-mention-picker-avatar lc-mention-picker-avatar--all" aria-hidden>
+                              <span>∀</span>
+                            </div>
+                            <div className="lc-mention-picker-text">
+                              <div className="lc-mention-picker-name">Все участники</div>
+                              <div className="lc-mention-picker-tag">@all — уведомление всем</div>
+                            </div>
+                          </button>
+                        ) : (
+                          <button
+                            key={item.user.id}
+                            type="button"
+                            role="option"
+                            aria-selected={idx === mentionPickIdx}
+                            className={`lc-mention-picker-row${idx === mentionPickIdx ? ' lc-mention-picker-row--active' : ''}`}
+                            onMouseDown={(ev) => ev.preventDefault()}
+                            onMouseEnter={() => setMentionPickIdx(idx)}
+                            onClick={() => applyMentionChoice(item.user)}
+                          >
+                            <div className="lc-mention-picker-avatar" aria-hidden>
+                              {item.user.avatarUrl ? (
+                                <img src={resolveUrl(item.user.avatarUrl)} alt="" />
+                              ) : (
+                                <span>{item.user.displayName.slice(0, 1).toUpperCase()}</span>
+                              )}
+                            </div>
+                            <div className="lc-mention-picker-text">
+                              <div className="lc-mention-picker-name">{item.user.displayName}</div>
+                              <div className="lc-mention-picker-tag">@{item.user.tag}</div>
+                            </div>
+                          </button>
+                        )
+                      )
                     )}
                   </div>
                 )}
@@ -5267,6 +5697,17 @@ export default function ChatApp({
                         className="pill lc-composer-dropped-file-pill"
                       >
                         {f.name}
+                        {f.type.startsWith('image/') && (
+                          <button
+                            type="button"
+                            className="lc-composer-file-annotate"
+                            aria-label="Рисовать на фото"
+                            title="Рисовать на фото"
+                            onClick={() => openComposerPhotoAnnotator(f, i)}
+                          >
+                            ✏️
+                          </button>
+                        )}
                         <button
                           type="button"
                           className="lc-msg-ws-link-remove"
@@ -5308,7 +5749,9 @@ export default function ChatApp({
                       </svg>
                       {composerDropFiles.length > 0 ? (
                         <span className="lc-composer-attach-badge" aria-hidden>
-                          {composerDropFiles.length > 9 ? '9+' : composerDropFiles.length}
+                          {composerDropFiles.length > MAX_MESSAGE_PHOTOS
+                            ? `${MAX_MESSAGE_PHOTOS}+`
+                            : composerDropFiles.length}
                         </span>
                       ) : null}
                     </label>
@@ -5351,13 +5794,13 @@ export default function ChatApp({
                         : replyingTo
                           ? 'Ваш ответ… (Shift+Enter — новая строка)'
                             : active.kind === 'group'
-                            ? 'Сообщение… @ — участник, # — задача или документ; перетащите файлы сюда'
+                            ? 'Сообщение… @ — участник или @all, # — задача или документ; перетащите файлы сюда'
                             : 'Сообщение… @ник — упоминание; перетащите файлы сюда'
                     }
                     rows={1}
                     onKeyDown={(e) => {
                       const hashNavOpen = hashPickerVisible && hashCandidates.length > 0;
-                      const mentionNavOpen = mentionPickerVisible && mentionCandidates.length > 0;
+                      const mentionNavOpen = mentionPickerVisible && mentionPickerItems.length > 0;
                       if (hashNavOpen) {
                         if (e.key === 'ArrowDown') {
                           e.preventDefault();
@@ -5396,7 +5839,7 @@ export default function ChatApp({
                         if (e.key === 'ArrowDown') {
                           e.preventDefault();
                           setMentionPickIdx((i) =>
-                            Math.min(mentionCandidates.length - 1, i + 1)
+                            Math.min(mentionPickerItems.length - 1, i + 1)
                           );
                           return;
                         }
@@ -5407,14 +5850,16 @@ export default function ChatApp({
                         }
                         if (e.key === 'Enter' && !e.shiftKey) {
                           e.preventDefault();
-                          const pick = mentionCandidates[mentionPickIdx];
-                          if (pick) applyMentionChoice(pick);
+                          const pick = mentionPickerItems[mentionPickIdx];
+                          if (pick?.kind === 'all') applyMentionAllChoice();
+                          else if (pick?.kind === 'user') applyMentionChoice(pick.user);
                           return;
                         }
                         if (e.key === 'Tab' && !e.shiftKey) {
                           e.preventDefault();
-                          const pick = mentionCandidates[mentionPickIdx];
-                          if (pick) applyMentionChoice(pick);
+                          const pick = mentionPickerItems[mentionPickIdx];
+                          if (pick?.kind === 'all') applyMentionAllChoice();
+                          else if (pick?.kind === 'user') applyMentionChoice(pick.user);
                           return;
                         }
                       }
@@ -5700,34 +6145,47 @@ export default function ChatApp({
         </div>
       ) : null}
 
-      {chatDocImagePreviewUrl && (
-        <div
-          className="modal-backdrop lc-chat-doc-img-lightbox"
-          role="presentation"
-          onClick={() => setChatDocImagePreviewUrl(null)}
-        >
-          <div
-            className="lc-chat-doc-img-lightbox-inner"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Фото из документа"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              type="button"
-              className="lc-task-file-lightbox-close"
-              aria-label="Закрыть"
-              onClick={() => setChatDocImagePreviewUrl(null)}
-            >
-              ×
-            </button>
-            <img
-              src={chatDocImagePreviewUrl}
-              alt=""
-              className="lc-task-file-lightbox-img"
-            />
-          </div>
-        </div>
+      {imageLightbox && (
+        <ChatImageLightbox
+          items={imageLightbox.items}
+          index={imageLightbox.index}
+          onClose={() => setImageLightbox(null)}
+          onIndexChange={(index) => setImageLightbox((prev) => (prev ? { ...prev, index } : null))}
+          onAnnotate={() => {
+            const item = imageLightbox.items[imageLightbox.index];
+            if (!item) return;
+            setImageLightbox(null);
+            setPhotoAnnotator({
+              src: item.url,
+              fileName: item.alt || 'photo.png',
+              fromLightbox: true,
+            });
+          }}
+        />
+      )}
+
+      {photoAnnotator && (
+        <PhotoAnnotator
+          imageSrc={photoAnnotator.src}
+          fileName={photoAnnotator.fileName}
+          onClose={closePhotoAnnotator}
+          saveLabel={photoAnnotator.fromLightbox ? 'Добавить к сообщению' : 'Готово'}
+          onSave={(file) => {
+            if (photoAnnotator.composerIndex != null) {
+              const idx = photoAnnotator.composerIndex;
+              setComposerDropFiles((prev) => prev.map((f, j) => (j === idx ? file : f)));
+              showToast('Фото обновлено');
+            } else {
+              setComposerDropFiles((prev) =>
+                capComposerPhotoFiles(prev, [file], () =>
+                  showToast(`Можно прикрепить не больше ${MAX_MESSAGE_PHOTOS} фотографий`)
+                )
+              );
+              showToast('Фото с рисунком добавлено к сообщению');
+            }
+            closePhotoAnnotator();
+          }}
+        />
       )}
 
       {toast != null && (
@@ -5798,17 +6256,18 @@ export default function ChatApp({
               </>
             )}
           </p>
-          <label style={{ marginTop: 12 }}>
-            <input
-              type="checkbox"
-              checked={exitDeleteMyMessages}
-              onChange={(e) => setExitDeleteMyMessages(e.target.checked)}
-            />
-            <span>
-              Удалить свои сообщения: они исчезнут у всех в этом чате (в группе — для всех
-              участников, в личке — у вас и у собеседника).
-            </span>
-          </label>
+          {exitChatModal.kind !== 'leave-group' && (
+            <label style={{ marginTop: 12 }}>
+              <input
+                type="checkbox"
+                checked={exitDeleteMyMessages}
+                onChange={(e) => setExitDeleteMyMessages(e.target.checked)}
+              />
+              <span>
+                Удалить свои сообщения: они исчезнут у вас и у собеседника в этом личном чате.
+              </span>
+            </label>
+          )}
         </Modal>
       )}
 
@@ -6283,7 +6742,7 @@ export default function ChatApp({
                       className="lc-ws-link-pick-photo-btn"
                       title="Открыть фото"
                       aria-label="Открыть фото документа"
-                      onClick={() => setChatDocImagePreviewUrl(resolveUrl(d.previewImageUrl!))}
+                      onClick={() => openSingleImageLightbox(resolveUrl(d.previewImageUrl!))}
                     >
                       🖼
                     </button>
@@ -6358,8 +6817,30 @@ export default function ChatApp({
       {modal === 'groupAnnouncements' && active?.kind === 'group' && canMod && (
         <GroupAnnouncementsModal
           groupId={active.id}
+          members={members}
           statsRefreshKey={announcementStatsRefreshKey}
           onClose={() => setModal(null)}
+          onOpenLinkedTask={(taskId) => void openLinkedTaskFromChat(taskId)}
+        />
+      )}
+
+      {myAssignmentsOpen && active?.kind === 'group' && (
+        <MyAssignmentsPanel
+          groupId={active.id}
+          open={myAssignmentsOpen}
+          onClose={() => setMyAssignmentsOpen(false)}
+          refreshKey={myAssignmentsRefreshKey}
+          onOpenLinkedTask={(taskId) => {
+            setMyAssignmentsOpen(false);
+            void openLinkedTaskFromChat(taskId);
+          }}
+          onUpdated={() => {
+            setMyAssignmentsRefreshKey((k) => k + 1);
+            void refreshAssignmentBadges();
+            void api<GroupAnnouncement[]>(`/api/groups/${active.id}/announcements/my-assignments`)
+              .then((rows) => setActiveAssignmentCount(Array.isArray(rows) ? rows.length : 0))
+              .catch(() => setActiveAssignmentCount(0));
+          }}
         />
       )}
 
@@ -6395,12 +6876,18 @@ export default function ChatApp({
       {announcementAckOpen && pendingAnnouncements.length > 0 && active?.kind === 'group' && (
         <AnnouncementAckModal
           announcements={pendingAnnouncements}
+          onOpenLinkedTask={(taskId) => void openLinkedTaskFromChat(taskId)}
           onResponded={(id) => {
             setPendingAnnouncements((prev) => {
               const next = prev.filter((a) => a.id !== id);
               if (next.length === 0) setAnnouncementAckOpen(false);
               return next;
             });
+            setMyAssignmentsRefreshKey((k) => k + 1);
+            void refreshAssignmentBadges();
+            void api<GroupAnnouncement[]>(`/api/groups/${active.id}/announcements/my-assignments`)
+              .then((rows) => setActiveAssignmentCount(Array.isArray(rows) ? rows.length : 0))
+              .catch(() => setActiveAssignmentCount(0));
           }}
         />
       )}
@@ -6883,6 +7370,8 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   chat_clear_own: 'Удаление своих сообщений',
   announcement_create: 'Создание объявления',
   announcement_delete: 'Удаление объявления',
+  assignment_create: 'Создание назначения',
+  assignment_progress: 'Обновление прогресса назначения',
   collab_folder_create: 'Создание папки документов',
   collab_folder_move: 'Перемещение папки',
   collab_folder_update: 'Изменение папки',
@@ -6900,6 +7389,16 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   task_attachment_upload: 'Загрузка вложения к задаче',
   task_board_canvas_file_upload: 'Загрузка файла на доску',
 };
+
+const GROUP_ROLE_LABELS: Record<string, string> = {
+  member: 'Участник',
+  moderator: 'Модератор',
+  admin: 'Администратор',
+};
+
+function groupRoleLabel(role: string): string {
+  return GROUP_ROLE_LABELS[role] ?? role;
+}
 
 const AUDIT_ROLE_LABELS: Record<string, string> = {
   member: 'участник',
@@ -6971,6 +7470,19 @@ function describeAuditMeta(
     case 'announcement_create':
     case 'announcement_delete':
       return null;
+    case 'assignment_create': {
+      const kind = typeof meta.kind === 'string' ? meta.kind : '';
+      const kindRu =
+        kind === 'assignment' ? 'быстрая задача' : kind === 'linked_task' ? 'задача с доски' : 'уведомление';
+      const n =
+        typeof meta.recipientCount === 'number' ? ` · ${meta.recipientCount} получ.` : '';
+      return `${kindRu}${n}`;
+    }
+    case 'assignment_progress': {
+      const st = typeof meta.taskStatus === 'string' ? meta.taskStatus : '';
+      const pr = typeof meta.progress === 'number' ? `${meta.progress}%` : '';
+      return [st, pr].filter(Boolean).join(' · ') || null;
+    }
     case 'collab_folder_create':
     case 'collab_folder_update':
     case 'collab_folder_delete':
@@ -7413,8 +7925,31 @@ function GroupModModal({
         {members.map((u) => (
           <li key={u.id}>
             <div className="lc-group-mod-member-line">
-              <span>
-                <strong>{u.displayName}</strong> @{u.tag} · {u.role}
+              <span className="lc-group-mod-member-name">
+                <strong>{u.displayName}</strong> @{u.tag} ·{' '}
+                {u.id !== me.id && role === 'admin' ? (
+                  <select
+                    className="lc-group-mod-role-select"
+                    value={u.role ?? 'member'}
+                    aria-label={`Роль ${u.displayName}`}
+                    onChange={(e) => {
+                      const newRole = e.target.value;
+                      if (newRole === u.role) return;
+                      void runModerationAction(() =>
+                        api(`/api/groups/${groupId}/role`, {
+                          method: 'POST',
+                          json: { userId: u.id, role: newRole },
+                        })
+                      );
+                    }}
+                  >
+                    <option value="member">Участник</option>
+                    <option value="moderator">Модератор</option>
+                    <option value="admin">Администратор</option>
+                  </select>
+                ) : (
+                  groupRoleLabel(u.role ?? 'member')
+                )}
               </span>
               <span className="row-actions lc-group-mod-actions">
                 {u.id !== me.id && friendIds[u.id] && (
@@ -7465,7 +8000,7 @@ function GroupModModal({
                       В коллеги
                     </button>
                   )}
-                {u.id !== me.id && role !== 'member' && (
+                {u.id !== me.id && role !== 'member' && (u.role !== 'admin' || role === 'admin') && (
                   <>
                   <button
                     type="button"
@@ -7494,36 +8029,6 @@ function GroupModModal({
                   >
                     Бан
                   </button>
-                  {role === 'admin' && u.role !== 'admin' && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          runModerationAction(() =>
-                            api(`/api/groups/${groupId}/role`, {
-                              method: 'POST',
-                              json: { userId: u.id, role: 'moderator' },
-                            })
-                          )
-                        }
-                      >
-                        Модератор
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          runModerationAction(() =>
-                            api(`/api/groups/${groupId}/role`, {
-                              method: 'POST',
-                              json: { userId: u.id, role: 'member' },
-                            })
-                          )
-                        }
-                      >
-                        Участник
-                      </button>
-                    </>
-                  )}
                 </>
                 )}
               </span>

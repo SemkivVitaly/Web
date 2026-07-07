@@ -14,7 +14,11 @@ import fs from 'node:fs';
 import { getDb } from './db.js';
 import { hashPassword, verifyPassword, signToken } from './auth.js';
 import { requireAuth } from './middleware.js';
-import { parseMentionTags, parseExtraMentionUserIdsFromBody } from './mentions.js';
+import {
+  parseMentionTags,
+  parseExtraMentionUserIdsFromBody,
+  syncGroupMessageMentions,
+} from './mentions.js';
 import { upload, detectKind, uploadsDir, normalizePossibleMultipartFilename } from './upload.js';
 import { appendWorkspaceRoutes } from './workspaceRoutes.js';
 import { writeAudit } from './auditLog.js';
@@ -22,6 +26,10 @@ import { appendOnlyOfficeRoutes } from './onlyOfficeRoutes.js';
 import { appendAnnouncementRoutes } from './announcementRoutes.js';
 import { createRateLimiter } from './rateLimit.js';
 import { unlinkOrphanMessageAttachmentFiles } from './uploadCleanup.js';
+import { appendFileRoutes, uploadBasenameApiUrl, attachmentApiUrl } from './fileAccess.js';
+import { buildMessagesPayloadList, buildMessagePayloadOne } from './messagePayloadBatch.js';
+import { insertMessageAttachmentRows } from './messageAttachments.js';
+import { setAuthCookie, clearAuthCookie } from './authCookie.js';
 
 /** Срабатывание UNIQUE в SQLite (в т.ч. обёрнутое в SQLITE_CONSTRAINT). */
 function isSqliteUniqueViolation(e) {
@@ -281,8 +289,10 @@ export function createApiRouter(io) {
 
   /** Удаляет сообщение и файлы вложений, если больше ни на одном сообщении не используются. */
   function deleteMessageWithAttachmentCleanup(messageId) {
-    const rows = db.prepare(`SELECT stored_name FROM message_attachments WHERE message_id = ?`).all(messageId);
-    const names = rows.map((x) => x.stored_name);
+    const rows = db
+      .prepare(`SELECT stored_name, thumb_stored_name FROM message_attachments WHERE message_id = ?`)
+      .all(messageId);
+    const names = rows.flatMap((x) => [x.stored_name, x.thumb_stored_name].filter(Boolean));
     db.prepare(`DELETE FROM messages WHERE id = ?`).run(messageId);
     unlinkOrphanMessageAttachmentFiles(db, names);
   }
@@ -370,7 +380,7 @@ export function createApiRouter(io) {
       displayName: u.display_name,
       tag: u.tag,
       bio: u.bio || '',
-      avatarUrl: u.avatar_file ? `/uploads/${u.avatar_file}` : null,
+      avatarUrl: u.avatar_file ? uploadBasenameApiUrl(u.avatar_file) : null,
       createdAt: u.created_at,
     };
   }
@@ -425,6 +435,10 @@ export function createApiRouter(io) {
         `SELECT role, banned_until FROM group_members WHERE group_id = ? AND user_id = ?`
       )
       .get(groupId, userId);
+  }
+
+  function isActiveGroupMember(groupId, userId) {
+    return !!getMembership(groupId, userId) && !isBannedMember(groupId, userId);
   }
 
   function requireGroupMember(groupId, userId, minRole = 'member') {
@@ -536,6 +550,7 @@ export function createApiRouter(io) {
     }
     const token = signToken({ userId });
     const user = db.prepare(`SELECT * FROM users WHERE id = ?`).get(userId);
+    setAuthCookie(res, token);
     res.json({ token, user: rowUser(user) });
   });
 
@@ -545,7 +560,14 @@ export function createApiRouter(io) {
     const user = db.prepare(`SELECT * FROM users WHERE username = ? COLLATE NOCASE`).get(username);
     if (!user || !verifyPassword(password, user.password_hash))
       return res.status(401).json({ error: 'Неверные данные' });
-    res.json({ token: signToken({ userId: user.id }), user: rowUser(user) });
+    const token = signToken({ userId: user.id });
+    setAuthCookie(res, token);
+    res.json({ token, user: rowUser(user) });
+  });
+
+  r.post('/auth/logout', (req, res) => {
+    clearAuthCookie(res);
+    res.json({ ok: true });
   });
 
   r.get('/me', requireAuth, (req, res) => {
@@ -867,15 +889,6 @@ export function createApiRouter(io) {
     const gid = +req.params.id;
     const m = getMembership(gid, req.userId);
     if (!m) return res.status(404).json({ error: 'Не состоите в группе' });
-    if (req.body?.deleteMyMessages === true) {
-      db.prepare(`DELETE FROM messages WHERE group_id = ? AND sender_id = ?`).run(gid, req.userId);
-      io.to(`group:${gid}`).emit('chat:messages-cleared', {
-        chatKind: 'group',
-        chatId: gid,
-        scope: 'sender',
-        clearedSenderId: req.userId,
-      });
-    }
     const leaver = db.prepare(`SELECT display_name FROM users WHERE id = ?`).get(req.userId);
     const dn = String(leaver?.display_name || 'Пользователь').trim().slice(0, 200) || 'Пользователь';
     const leaveBody = `Пользователь ${dn} покинул чат`;
@@ -1015,7 +1028,8 @@ export function createApiRouter(io) {
     if (!chk.ok) return res.status(403).json({ error: chk.error });
     if (tid === req.userId) return res.status(400).json({ error: 'Нельзя забанить самого себя' });
     const tmem = getMembership(gid, tid);
-    if (tmem && tmem.role === 'admin') return res.status(403).json({ error: 'Нельзя забанить администратора' });
+    if (tmem && tmem.role === 'admin' && chk.role !== 'admin')
+      return res.status(403).json({ error: 'Нельзя забанить администратора' });
     // Бан = постоянное исключение: записываем в group_bans, удаляем из участников,
     // снимаем возможные приглашения. Разбанить можно из списка забаненных.
     const tx = db.transaction(() => {
@@ -1253,7 +1267,7 @@ export function createApiRouter(io) {
     const rows = db
       .prepare(`SELECT * FROM messages WHERE group_id = ? ORDER BY id ASC LIMIT ?`)
       .all(gid, cap);
-    const messages = rows.map((row) => buildMessagePayload(row, req.userId));
+    const messages = mapMessagesPayload(rows, req.userId);
     const ext = format === 'txt' ? 'txt' : 'json';
     res.setHeader('Content-Disposition', `attachment; filename="group-${gid}-messages.${ext}"`);
     if (format === 'txt') {
@@ -1301,7 +1315,7 @@ export function createApiRouter(io) {
     const msgRows = db
       .prepare(`SELECT * FROM messages WHERE group_id = ? ORDER BY id ASC LIMIT ?`)
       .all(gid, cap);
-    const messages = msgRows.map((row) => buildMessagePayload(row, req.userId));
+    const messages = mapMessagesPayload(msgRows, req.userId);
     const auditRows = db
       .prepare(`SELECT * FROM audit_log WHERE target_kind = 'group' AND target_id = ? ORDER BY id ASC`)
       .all(gid);
@@ -1658,16 +1672,27 @@ export function createApiRouter(io) {
     const gid = +req.params.groupId;
     const chk = requireGroupMember(gid, req.userId);
     if (!chk.ok) return res.status(403).json({ error: chk.error });
+    const limit = Math.min(200, Math.max(1, +req.query.limit || 50));
+    const offset = Math.max(0, +req.query.offset || 0);
+    const linkLimit = Math.min(200, Math.max(1, +req.query.linkLimit || 50));
+    const linkOffset = Math.max(0, +req.query.linkOffset || 0);
     const attRows = db
       .prepare(
         `SELECT a.id, a.message_id AS messageId, a.file_name AS fileName, a.mime_type AS mimeType,
-                a.kind, m.created_at AS createdAt, a.stored_name AS storedName, m.sender_id AS senderId
+                a.kind, m.created_at AS createdAt, m.sender_id AS senderId
          FROM message_attachments a
          JOIN messages m ON m.id = a.message_id
          WHERE m.group_id = ?
-         ORDER BY m.created_at DESC, a.id DESC`
+         ORDER BY m.created_at DESC, a.id DESC
+         LIMIT ? OFFSET ?`
       )
-      .all(gid);
+      .all(gid, limit, offset);
+    const attTotal = db
+      .prepare(
+        `SELECT COUNT(*) AS c FROM message_attachments a
+         JOIN messages m ON m.id = a.message_id WHERE m.group_id = ?`
+      )
+      .get(gid)?.c ?? 0;
     const attachments = attRows.map((a) => ({
       id: a.id,
       messageId: a.messageId,
@@ -1676,16 +1701,16 @@ export function createApiRouter(io) {
       fileName: normalizePossibleMultipartFilename(a.fileName) || a.fileName,
       mimeType: a.mimeType,
       kind: a.kind,
-      url: `/uploads/${a.storedName}`,
+      url: attachmentApiUrl(a.id),
     }));
     const msgRows = db
       .prepare(
         `SELECT id, body, created_at AS createdAt FROM messages
          WHERE group_id = ? AND body LIKE '%http%'
          ORDER BY created_at DESC
-         LIMIT 800`
+         LIMIT ? OFFSET ?`
       )
-      .all(gid);
+      .all(gid, linkLimit, linkOffset);
     const links = [];
     const seen = new Set();
     for (const row of msgRows) {
@@ -1701,7 +1726,7 @@ export function createApiRouter(io) {
         });
       }
     }
-    res.json({ attachments, links });
+    res.json({ attachments, links, totalAttachments: attTotal, limit, offset, linkLimit, linkOffset });
   });
 
   r.get('/direct/:directId/chat-attachments', requireAuth, (req, res) => {
@@ -1709,16 +1734,27 @@ export function createApiRouter(io) {
     const d = db.prepare(`SELECT * FROM direct_conversations WHERE id = ?`).get(did);
     if (!d || (d.user_low_id !== req.userId && d.user_high_id !== req.userId))
       return res.status(403).json({ error: 'Нет доступа' });
+    const limit = Math.min(200, Math.max(1, +req.query.limit || 50));
+    const offset = Math.max(0, +req.query.offset || 0);
+    const linkLimit = Math.min(200, Math.max(1, +req.query.linkLimit || 50));
+    const linkOffset = Math.max(0, +req.query.linkOffset || 0);
     const attRows = db
       .prepare(
         `SELECT a.id, a.message_id AS messageId, a.file_name AS fileName, a.mime_type AS mimeType,
-                a.kind, m.created_at AS createdAt, a.stored_name AS storedName, m.sender_id AS senderId
+                a.kind, m.created_at AS createdAt, m.sender_id AS senderId
          FROM message_attachments a
          JOIN messages m ON m.id = a.message_id
          WHERE m.direct_id = ?
-         ORDER BY m.created_at DESC, a.id DESC`
+         ORDER BY m.created_at DESC, a.id DESC
+         LIMIT ? OFFSET ?`
       )
-      .all(did);
+      .all(did, limit, offset);
+    const attTotal = db
+      .prepare(
+        `SELECT COUNT(*) AS c FROM message_attachments a
+         JOIN messages m ON m.id = a.message_id WHERE m.direct_id = ?`
+      )
+      .get(did)?.c ?? 0;
     const attachments = attRows.map((a) => ({
       id: a.id,
       messageId: a.messageId,
@@ -1727,16 +1763,16 @@ export function createApiRouter(io) {
       fileName: normalizePossibleMultipartFilename(a.fileName) || a.fileName,
       mimeType: a.mimeType,
       kind: a.kind,
-      url: `/uploads/${a.storedName}`,
+      url: attachmentApiUrl(a.id),
     }));
     const msgRows = db
       .prepare(
         `SELECT id, body, created_at AS createdAt FROM messages
          WHERE direct_id = ? AND body LIKE '%http%'
          ORDER BY created_at DESC
-         LIMIT 800`
+         LIMIT ? OFFSET ?`
       )
-      .all(did);
+      .all(did, linkLimit, linkOffset);
     const links = [];
     const seen = new Set();
     for (const row of msgRows) {
@@ -1752,7 +1788,7 @@ export function createApiRouter(io) {
         });
       }
     }
-    res.json({ attachments, links });
+    res.json({ attachments, links, totalAttachments: attTotal, limit, offset, linkLimit, linkOffset });
   });
 
   function canAccessMessage(msg, userId) {
@@ -1938,50 +1974,19 @@ export function createApiRouter(io) {
     }));
   }
 
+  const payloadCtx = {
+    sqliteUtcToIso,
+    groupMemberChatEventKind,
+    buildForwardFromForPayload,
+    outboundReadReceipt,
+  };
+
+  function mapMessagesPayload(rows, viewerUserId) {
+    return buildMessagesPayloadList(db, rows, viewerUserId, payloadCtx);
+  }
+
   function buildMessagePayload(msg, viewerUserId) {
-    const sender = db.prepare(`SELECT * FROM users WHERE id = ?`).get(msg.sender_id);
-    const atts = db
-      .prepare(`SELECT * FROM message_attachments WHERE message_id = ?`)
-      .all(msg.id);
-    const mentions = db
-      .prepare(`SELECT user_id FROM message_mentions WHERE message_id = ?`)
-      .all(msg.id)
-      .map((x) => x.user_id);
-    const importantForMe =
-      viewerUserId != null &&
-      !!db
-        .prepare(`SELECT 1 FROM user_message_important WHERE user_id = ? AND message_id = ?`)
-        .get(viewerUserId, msg.id);
-    const bodyOut = msg.body;
-    const chatEvent = msg.group_id ? groupMemberChatEventKind(msg.body) : null;
-    return {
-      id: msg.id,
-      groupId: msg.group_id,
-      directId: msg.direct_id,
-      sender: rowUser(sender),
-      body: bodyOut,
-      ...(chatEvent ? { chatEvent } : {}),
-      pinnedAt: sqliteUtcToIso(msg.pinned_at) ?? msg.pinned_at,
-      createdAt: sqliteUtcToIso(msg.created_at) ?? msg.created_at,
-      editedAt: msg.edited_at ? sqliteUtcToIso(msg.edited_at) ?? msg.edited_at : null,
-      replyTo: buildReplyToPayload(msg.reply_to_id, viewerUserId),
-      forwardFrom: buildForwardFromForPayload(msg, viewerUserId),
-      reactions: buildReactionsPayload(msg.id),
-      importantForMe,
-      attachmentIds: atts.map((a) => a.id),
-      attachments: atts.map((a) => ({
-        id: a.id,
-        url: `/uploads/${a.stored_name}`,
-        fileName: normalizePossibleMultipartFilename(a.file_name) || a.file_name,
-        mimeType: a.mime_type,
-        kind: a.kind,
-        transcript: a.transcript || null,
-      })),
-      mentionUserIds: mentions,
-      outboundRead: outboundReadReceipt(msg, viewerUserId),
-      threadRootId: msg.thread_root_id ?? null,
-      workspaceLinks: buildWorkspaceLinksPayload(msg.id),
-    };
+    return buildMessagePayloadOne(db, msg, viewerUserId, payloadCtx);
   }
 
   /** Личные сообщения — в комнаты user:*, иначе получатель не подписан на direct:* до появления чата в списке. */
@@ -2091,7 +2096,7 @@ export function createApiRouter(io) {
       .all(rootId, rootId);
     res.json({
       rootId,
-      messages: rows.map((row) => buildMessagePayload(row, req.userId)),
+      messages: mapMessagesPayload(rows, req.userId),
     });
   });
 
@@ -2191,7 +2196,7 @@ export function createApiRouter(io) {
     const merged = [...older, msg, ...newer];
     res.json({
       focusMessageId: mid,
-      messages: merged.map((row) => buildMessagePayload(row, req.userId)),
+      messages: mapMessagesPayload(merged, req.userId),
     });
   });
 
@@ -2256,6 +2261,16 @@ export function createApiRouter(io) {
   // --- Лента сообщений: список, отправка с файлами, реакции, пины, пересылка, редактирование ---
 
   const msgUpload = upload.fields([{ name: 'files', maxCount: 12 }]);
+  const MAX_MESSAGE_PHOTOS = 10;
+
+  function rejectIfTooManyPhotos(files, res) {
+    const n = files.filter((f) => detectKind(f.mimetype) === 'image').length;
+    if (n > MAX_MESSAGE_PHOTOS) {
+      res.status(400).json({ error: `Не больше ${MAX_MESSAGE_PHOTOS} фотографий в одном сообщении` });
+      return true;
+    }
+    return false;
+  }
 
   r.get('/groups/:id/messages', requireAuth, (req, res) => {
     const gid = +req.params.id;
@@ -2263,18 +2278,24 @@ export function createApiRouter(io) {
     if (!chk.ok) return res.status(403).json({ error: chk.error });
     const limit = Math.min(100, Math.max(1, +req.query.limit || 50));
     const before = req.query.before ? +req.query.before : null;
+    const since = req.query.since ? +req.query.since : null;
     let rows;
-    if (before)
+    if (since && Number.isFinite(since) && since > 0) {
       rows = db
-        .prepare(
-          `SELECT * FROM messages WHERE group_id = ? AND id < ? ORDER BY id DESC LIMIT ?`
-        )
+        .prepare(`SELECT * FROM messages WHERE group_id = ? AND id > ? ORDER BY id ASC LIMIT ?`)
+        .all(gid, since, limit);
+    } else if (before) {
+      rows = db
+        .prepare(`SELECT * FROM messages WHERE group_id = ? AND id < ? ORDER BY id DESC LIMIT ?`)
         .all(gid, before, limit);
-    else
+      rows.reverse();
+    } else {
       rows = db
         .prepare(`SELECT * FROM messages WHERE group_id = ? ORDER BY id DESC LIMIT ?`)
         .all(gid, limit);
-    res.json(rows.reverse().map((row) => buildMessagePayload(row, req.userId)));
+      rows.reverse();
+    }
+    res.json(mapMessagesPayload(rows, req.userId));
   });
 
   r.get('/direct/:directId/messages', requireAuth, (req, res) => {
@@ -2284,18 +2305,24 @@ export function createApiRouter(io) {
       return res.status(403).json({ error: 'Нет доступа' });
     const limit = Math.min(100, Math.max(1, +req.query.limit || 50));
     const before = req.query.before ? +req.query.before : null;
+    const since = req.query.since ? +req.query.since : null;
     let rows;
-    if (before)
+    if (since && Number.isFinite(since) && since > 0) {
       rows = db
-        .prepare(
-          `SELECT * FROM messages WHERE direct_id = ? AND id < ? ORDER BY id DESC LIMIT ?`
-        )
+        .prepare(`SELECT * FROM messages WHERE direct_id = ? AND id > ? ORDER BY id ASC LIMIT ?`)
+        .all(did, since, limit);
+    } else if (before) {
+      rows = db
+        .prepare(`SELECT * FROM messages WHERE direct_id = ? AND id < ? ORDER BY id DESC LIMIT ?`)
         .all(did, before, limit);
-    else
+      rows.reverse();
+    } else {
       rows = db
         .prepare(`SELECT * FROM messages WHERE direct_id = ? ORDER BY id DESC LIMIT ?`)
         .all(did, limit);
-    res.json(rows.reverse().map((row) => buildMessagePayload(row, req.userId)));
+      rows.reverse();
+    }
+    res.json(mapMessagesPayload(rows, req.userId));
   });
 
   /** Реакции — регистрируем рядом с сообщениями (до остальных /messages/:id/*). */
@@ -2324,7 +2351,7 @@ export function createApiRouter(io) {
     res.json(payload);
   });
 
-  r.post('/groups/:id/messages', requireAuth, msgUpload, msgUserLimit, (req, res) => {
+  r.post('/groups/:id/messages', requireAuth, msgUpload, msgUserLimit, async (req, res) => {
     const gid = +req.params.id;
     const chk = requireGroupMember(gid, req.userId);
     if (!chk.ok) return res.status(403).json({ error: chk.error });
@@ -2336,6 +2363,7 @@ export function createApiRouter(io) {
     if (!bodyTrimmed && files.length === 0 && composeWorkspaceLinks.length === 0) {
       return res.status(400).json({ error: 'Пустое сообщение' });
     }
+    if (rejectIfTooManyPhotos(files, res)) return;
     const rawReply = req.body?.replyToId ?? req.body?.reply_to_id;
     const vreply = validateReplyTarget(rawReply, gid, null, req.userId);
     if (!vreply.ok) return res.status(400).json({ error: vreply.error });
@@ -2351,36 +2379,16 @@ export function createApiRouter(io) {
       )
       .run(gid, req.userId, bodyTrimmed, replyToIdFinal, threadRootId);
     const mid = info.lastInsertRowid;
-    for (const f of files) {
-      const kind = detectKind(f.mimetype);
-      const displayName =
-        normalizePossibleMultipartFilename(f.originalname) || f.originalname || f.filename;
-      db.prepare(
-        `INSERT INTO message_attachments (message_id, file_name, stored_name, mime_type, kind) VALUES (?,?,?,?,?)`
-      ).run(mid, displayName, f.filename, f.mimetype || 'application/octet-stream', kind);
-    }
-    const tags = parseMentionTags(bodyTrimmed);
-    for (const t of tags) {
-      const u = db.prepare(`SELECT id FROM users WHERE tag = ? COLLATE NOCASE`).get(t);
-      if (u) {
-        const inGroup = getMembership(gid, u.id);
-        if (inGroup && !isBannedMember(gid, u.id)) {
-          db.prepare(`INSERT OR IGNORE INTO message_mentions (message_id, user_id) VALUES (?,?)`).run(
-            mid,
-            u.id
-          );
-        }
-      }
-    }
-    for (const uid of parseExtraMentionUserIdsFromBody(req.body)) {
-      const inGroup = getMembership(gid, uid);
-      if (inGroup && !isBannedMember(gid, uid)) {
-        db.prepare(`INSERT OR IGNORE INTO message_mentions (message_id, user_id) VALUES (?,?)`).run(
-          mid,
-          uid
-        );
-      }
-    }
+    const attIns = await insertMessageAttachmentRows(db, mid, files);
+    if (!attIns.ok) return res.status(attIns.status).json({ error: attIns.error });
+    syncGroupMessageMentions({
+      db,
+      messageId: mid,
+      groupId: gid,
+      body: bodyTrimmed,
+      extraUserIds: parseExtraMentionUserIdsFromBody(req.body),
+      isActiveMember: isActiveGroupMember,
+    });
     for (const link of composeWorkspaceLinks) {
       tryInsertMessageWorkspaceLink(db, mid, gid, req.userId, link.kind, link.entityId);
     }
@@ -2394,7 +2402,7 @@ export function createApiRouter(io) {
     res.json(buildMessagePayload(msg, req.userId));
   });
 
-  r.post('/direct/:directId/messages', requireAuth, msgUpload, msgUserLimit, (req, res) => {
+  r.post('/direct/:directId/messages', requireAuth, msgUpload, msgUserLimit, async (req, res) => {
     const did = +req.params.directId;
     const d = db.prepare(`SELECT * FROM direct_conversations WHERE id = ?`).get(did);
     if (!d || (d.user_low_id !== req.userId && d.user_high_id !== req.userId))
@@ -2407,6 +2415,7 @@ export function createApiRouter(io) {
     if (!bodyTrimmed && files.length === 0) {
       return res.status(400).json({ error: 'Пустое сообщение' });
     }
+    if (rejectIfTooManyPhotos(files, res)) return;
     const rawReply = req.body?.replyToId ?? req.body?.reply_to_id;
     const vreply = validateReplyTarget(rawReply, null, did, req.userId);
     if (!vreply.ok) return res.status(400).json({ error: vreply.error });
@@ -2422,14 +2431,8 @@ export function createApiRouter(io) {
       )
       .run(did, req.userId, bodyTrimmed, replyToIdFinal, threadRootIdDm);
     const mid = info.lastInsertRowid;
-    for (const f of files) {
-      const kind = detectKind(f.mimetype);
-      const displayNameDm =
-        normalizePossibleMultipartFilename(f.originalname) || f.originalname || f.filename;
-      db.prepare(
-        `INSERT INTO message_attachments (message_id, file_name, stored_name, mime_type, kind) VALUES (?,?,?,?,?)`
-      ).run(mid, displayNameDm, f.filename, f.mimetype || 'application/octet-stream', kind);
-    }
+    const attInsDm = await insertMessageAttachmentRows(db, mid, files);
+    if (!attInsDm.ok) return res.status(attInsDm.status).json({ error: attInsDm.error });
     const tagsDm = parseMentionTags(bodyTrimmed);
     for (const t of tagsDm) {
       const u = db.prepare(`SELECT id FROM users WHERE tag = ? COLLATE NOCASE`).get(t);
@@ -2524,7 +2527,7 @@ export function createApiRouter(io) {
     );
     const selectAtts = db.prepare(`SELECT * FROM message_attachments WHERE message_id = ?`);
     const insertAtt = db.prepare(
-      `INSERT INTO message_attachments (message_id, file_name, stored_name, mime_type, kind, transcript) VALUES (?,?,?,?,?,?)`
+      `INSERT INTO message_attachments (message_id, file_name, stored_name, thumb_stored_name, mime_type, kind, transcript) VALUES (?,?,?,?,?,?,?)`
     );
     const runForward = db.transaction(() => {
       const info =
@@ -2535,7 +2538,15 @@ export function createApiRouter(io) {
       for (const src of sources) {
         const atts = selectAtts.all(src.id);
         for (const a of atts) {
-          insertAtt.run(mid, a.file_name, a.stored_name, a.mime_type, a.kind, a.transcript || null);
+          insertAtt.run(
+            mid,
+            a.file_name,
+            a.stored_name,
+            a.thumb_stored_name || null,
+            a.mime_type,
+            a.kind,
+            a.transcript || null
+          );
         }
       }
       return mid;
@@ -2631,28 +2642,14 @@ export function createApiRouter(io) {
     db.prepare(`UPDATE messages SET body = ?, edited_at = ? WHERE id = ?`).run(bodyTrimmed, nowIso(), mid);
     db.prepare(`DELETE FROM message_mentions WHERE message_id = ?`).run(mid);
     if (msg.group_id) {
-      const tags = parseMentionTags(bodyTrimmed);
-      for (const t of tags) {
-        const u = db.prepare(`SELECT id FROM users WHERE tag = ? COLLATE NOCASE`).get(t);
-        if (u) {
-          const inGroup = getMembership(msg.group_id, u.id);
-          if (inGroup && !isBannedMember(msg.group_id, u.id)) {
-            db.prepare(`INSERT OR IGNORE INTO message_mentions (message_id, user_id) VALUES (?,?)`).run(
-              mid,
-              u.id
-            );
-          }
-        }
-      }
-      for (const uid of parseExtraMentionUserIdsFromBody(req.body)) {
-        const inGroup = getMembership(msg.group_id, uid);
-        if (inGroup && !isBannedMember(msg.group_id, uid)) {
-          db.prepare(`INSERT OR IGNORE INTO message_mentions (message_id, user_id) VALUES (?,?)`).run(
-            mid,
-            uid
-          );
-        }
-      }
+      syncGroupMessageMentions({
+        db,
+        messageId: mid,
+        groupId: msg.group_id,
+        body: bodyTrimmed,
+        extraUserIds: parseExtraMentionUserIdsFromBody(req.body),
+        isActiveMember: isActiveGroupMember,
+      });
     } else if (msg.direct_id) {
       const dRow = db.prepare(`SELECT * FROM direct_conversations WHERE id = ?`).get(msg.direct_id);
       if (dRow) {
@@ -2752,11 +2749,12 @@ export function createApiRouter(io) {
     const atts = db.prepare(`SELECT * FROM message_attachments WHERE message_id = ?`).all(mid);
     for (const a of atts) {
       db.prepare(
-        `INSERT INTO message_attachments (message_id, file_name, stored_name, mime_type, kind, transcript) VALUES (?,?,?,?,?,?)`
+        `INSERT INTO message_attachments (message_id, file_name, stored_name, thumb_stored_name, mime_type, kind, transcript) VALUES (?,?,?,?,?,?,?)`
       ).run(
         newMid,
         a.file_name,
         a.stored_name,
+        a.thumb_stored_name || null,
         a.mime_type,
         a.kind,
         a.transcript || null
@@ -2790,7 +2788,7 @@ export function createApiRouter(io) {
         `SELECT * FROM messages WHERE group_id = ? AND pinned_at IS NOT NULL ORDER BY id DESC`
       )
       .all(gid);
-    res.json(rows.map((row) => buildMessagePayload(row, req.userId)));
+    res.json(mapMessagesPayload(rows, req.userId));
   });
 
   r.get('/direct/:directId/pins', requireAuth, (req, res) => {
@@ -2803,7 +2801,7 @@ export function createApiRouter(io) {
         `SELECT * FROM messages WHERE direct_id = ? AND pinned_at IS NOT NULL ORDER BY id DESC`
       )
       .all(did);
-    res.json(rows.map((row) => buildMessagePayload(row, req.userId)));
+    res.json(mapMessagesPayload(rows, req.userId));
   });
 
   r.get('/tasks/:taskId/linked-chat-messages', requireAuth, (req, res) => {
@@ -2861,6 +2859,11 @@ export function createApiRouter(io) {
   appendWorkspaceRoutes(r, io);
   appendOnlyOfficeRoutes(r, io);
   appendAnnouncementRoutes(r, io);
+  appendFileRoutes(r);
+
+  r.use((_req, res) => {
+    res.status(404).json({ error: 'Not found' });
+  });
 
   return r;
 }

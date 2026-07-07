@@ -915,6 +915,12 @@ export function mentionQueryAtCursor(value: string, cursor: number): { start: nu
   return { start: at, query: frag };
 }
 
+/** Подходит ли строка автодополнения для пункта `@all`. */
+export function mentionAllMatchesAutocompleteQuery(query: string): boolean {
+  const q = query.toLowerCase();
+  return q === '' || 'all'.startsWith(q);
+}
+
 /**
  * Аналогично {@link mentionQueryAtCursor}, но для `#` (привязка задачи/документа); в запросе допускаются пробелы, но не перевод строки.
  */

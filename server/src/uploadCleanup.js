@@ -33,7 +33,7 @@ export function safeUnlinkStoredUploadFile(storedName) {
 export function unlinkOrphanMessageAttachmentFiles(db, storedNames) {
   const uniq = [...new Set((storedNames || []).filter(Boolean))];
   for (const sn of uniq) {
-    const row = db.prepare(`SELECT COUNT(*) AS c FROM message_attachments WHERE stored_name = ?`).get(sn);
+    const row = db.prepare(`SELECT COUNT(*) AS c FROM message_attachments WHERE stored_name = ? OR thumb_stored_name = ?`).get(sn, sn);
     if (!row || Number(row.c) === 0) safeUnlinkStoredUploadFile(sn);
   }
 }

@@ -557,6 +557,103 @@ try {
   console.error('group_announcements deleted_at migration', e);
 }
 
+try {
+  const gaCols = db.prepare(`PRAGMA table_info(group_announcements)`).all();
+  if (gaCols.length) {
+    if (!gaCols.some((c) => c.name === 'kind')) {
+      db.exec(`ALTER TABLE group_announcements ADD COLUMN kind TEXT NOT NULL DEFAULT 'notice'`);
+    }
+    if (!gaCols.some((c) => c.name === 'audience')) {
+      db.exec(`ALTER TABLE group_announcements ADD COLUMN audience TEXT NOT NULL DEFAULT 'all'`);
+    }
+    if (!gaCols.some((c) => c.name === 'linked_task_id')) {
+      db.exec(`ALTER TABLE group_announcements ADD COLUMN linked_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL`);
+    }
+    if (!gaCols.some((c) => c.name === 'due_at')) {
+      db.exec(`ALTER TABLE group_announcements ADD COLUMN due_at TEXT`);
+    }
+    if (!gaCols.some((c) => c.name === 'quantity_target')) {
+      db.exec(`ALTER TABLE group_announcements ADD COLUMN quantity_target INTEGER`);
+    }
+  }
+} catch (e) {
+  console.error('group_announcements extended migration', e);
+}
+
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS announcement_recipients (
+      announcement_id INTEGER NOT NULL REFERENCES group_announcements(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      PRIMARY KEY (announcement_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_announcement_recipients_user ON announcement_recipients(user_id);
+  `);
+} catch (e) {
+  console.error('announcement_recipients migration', e);
+}
+
+try {
+  const ackCols = db.prepare(`PRAGMA table_info(announcement_acks)`).all();
+  if (ackCols.length) {
+    if (!ackCols.some((c) => c.name === 'task_status')) {
+      db.exec(`ALTER TABLE announcement_acks ADD COLUMN task_status TEXT`);
+    }
+    if (!ackCols.some((c) => c.name === 'progress')) {
+      db.exec(`ALTER TABLE announcement_acks ADD COLUMN progress INTEGER DEFAULT 0`);
+    }
+    if (!ackCols.some((c) => c.name === 'quantity_done')) {
+      db.exec(`ALTER TABLE announcement_acks ADD COLUMN quantity_done INTEGER DEFAULT 0`);
+    }
+    if (!ackCols.some((c) => c.name === 'progress_note')) {
+      db.exec(`ALTER TABLE announcement_acks ADD COLUMN progress_note TEXT`);
+    }
+  }
+} catch (e) {
+  console.error('announcement_acks extended migration', e);
+}
+
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS announcement_progress_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      announcement_id INTEGER NOT NULL REFERENCES group_announcements(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      task_status TEXT,
+      progress INTEGER,
+      quantity_done INTEGER,
+      note TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_announcement_progress_log_ann ON announcement_progress_log(announcement_id);
+  `);
+} catch (e) {
+  console.error('announcement_progress_log migration', e);
+}
+
+try {
+  const mai = db.prepare(`PRAGMA table_info(message_attachments)`).all();
+  if (mai.length && !mai.some((c) => c.name === 'thumb_stored_name')) {
+    db.exec(`ALTER TABLE message_attachments ADD COLUMN thumb_stored_name TEXT`);
+  }
+} catch (e) {
+  console.error('message_attachments thumb_stored_name migration', e);
+}
+
+try {
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_msg_attachments_message ON message_attachments(message_id)`);
+} catch (e) {
+  console.error('idx_msg_attachments_message', e);
+}
+
+if (process.env.SQLITE_OPTIMIZE !== '0') {
+  try {
+    db.pragma('optimize');
+  } catch (e) {
+    console.warn('[db] PRAGMA optimize skipped:', e?.message || e);
+  }
+}
+
 /** Единственный экземпляр `Database` процесса. */
 export function getDb() {
   return db;

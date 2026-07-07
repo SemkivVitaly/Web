@@ -8,6 +8,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { v4 as uuidv4 } from 'uuid';
+import { validateUploadBasics } from './uploadSecurity.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /** Абсолютный путь к каталогу файлов вложений и медиа (health-check, бэкап). */
@@ -68,11 +69,13 @@ function kindFromMime(mime) {
   return 'file';
 }
 
-/** Готовый `multer` с дисковым storage, UUID+расширение, лимит 80 МБ; `fileFilter` пропускает все типы. */
+/** Готовый `multer` с дисковым storage, UUID+расширение, лимит 80 МБ; отклоняет исполняемые типы. */
 export const upload = multer({
   storage,
   limits: { fileSize: 80 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
+    const check = validateUploadBasics(file.originalname, file.mimetype);
+    if (!check.ok) return cb(new Error(check.error));
     cb(null, true);
   },
 });

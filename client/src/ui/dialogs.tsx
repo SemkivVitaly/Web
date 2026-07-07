@@ -24,6 +24,8 @@ type PromptOptions = {
   multiline?: boolean;
   /** Разрешить пустую строку как валидный ответ. По умолчанию пустая строка допустима. */
   allowEmpty?: boolean;
+  /** Показать предупреждение о хранении в localStorage (пароли документов/досок). */
+  localStorageNotice?: boolean;
 };
 
 type DialogRequest =
@@ -56,6 +58,7 @@ type DialogRequest =
       cancelText?: string;
       multiline?: boolean;
       allowEmpty?: boolean;
+      localStorageNotice?: boolean;
       resolve: (value: string | null) => void;
     };
 
@@ -125,6 +128,7 @@ export function uiPrompt(message: string, opts: PromptOptions = {}): Promise<str
       cancelText: opts.cancelText,
       multiline: opts.multiline,
       allowEmpty: opts.allowEmpty,
+      localStorageNotice: opts.localStorageNotice,
       resolve,
     });
   });
@@ -237,7 +241,7 @@ export function DialogHost() {
             <input
               ref={inputRef}
               className="lc-dialog-input"
-              type="text"
+              type={current.localStorageNotice ? 'password' : 'text'}
               value={inputValue}
               placeholder={current.placeholder}
               onChange={(e) => setInputValue(e.target.value)}
@@ -249,6 +253,12 @@ export function DialogHost() {
               }}
             />
           ))}
+
+        {current.kind === 'prompt' && current.localStorageNotice ? (
+          <p className="lc-dialog-footnote lc-dialog-localstorage-notice">
+            Пароль сохраняется в localStorage этого браузера — не используйте на общих компьютерах.
+          </p>
+        ) : null}
 
         <div className="lc-dialog-actions">
           {current.kind === 'alert' && (

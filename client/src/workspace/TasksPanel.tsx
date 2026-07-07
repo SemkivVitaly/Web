@@ -1117,7 +1117,7 @@ export function TasksPanel({
 
   async function selectBoard(b: TaskBoardSummary) {
     if (b.hasPassword && !(effectiveBoardPw[b.id] ?? '').trim()) {
-      const p = (await uiPrompt(`Пароль доски «${b.name}»`, { title: 'Требуется пароль' })) || '';
+      const p = (await uiPrompt(`Пароль доски «${b.name}»`, { title: 'Требуется пароль', localStorageNotice: true })) || '';
       if (!p) return;
       setBoardPw((prev) => ({ ...prev, [b.id]: p }));
       rememberTaskBoardUnlock(groupId, b.id, b.passwordFingerprint, p);
@@ -1168,7 +1168,7 @@ export function TasksPanel({
                     if (!(await uiConfirm(`Удалить доску «${b.name}» и все задачи?`, { title: 'Удаление доски', danger: true, okText: 'Удалить' }))) return;
                     let pw = effectiveBoardPw[b.id] || '';
                     if (b.hasPassword && !pw) {
-                      pw = (await uiPrompt('Пароль доски', { title: 'Требуется пароль' })) || '';
+                      pw = (await uiPrompt('Пароль доски', { title: 'Требуется пароль', localStorageNotice: true })) || '';
                       if (!pw) return;
                     }
                     const q = pw ? `?password=${encodeURIComponent(pw)}` : '';

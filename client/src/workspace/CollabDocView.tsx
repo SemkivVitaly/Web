@@ -3,14 +3,17 @@
  * присоединение к комнате `collab:{docId}`, синхронизация через `collab:y-update`, редактирование описания при `canEditMeta`.
  */
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, lazy, Suspense } from 'react';
 import type { Socket } from 'socket.io-client';
 import * as Y from 'yjs';
 import { api } from '../api';
 import { yjsUpdateToBase64, base64ToUint8Array } from './yjsB64';
 import { CollabRichText } from './CollabRichText';
-import { CollabSheet } from './CollabSheet';
 import { OnlyOfficeDocEmbed } from './OnlyOfficeDocEmbed';
+
+const CollabSheet = lazy(() =>
+  import('./CollabSheet').then((m) => ({ default: m.CollabSheet }))
+);
 
 type JoinResp = { ok?: boolean; error?: string; state?: string };
 
@@ -298,7 +301,9 @@ export function CollabDocView({
         <CollabRichText ydoc={ydoc} docName={docName} imageFocus={imageDocument} />
       )}
       {editorMode === 'yjs' && !err && ready && ydoc && docType === 'spreadsheet' && (
-        <CollabSheet ydoc={ydoc} docName={docName} />
+        <Suspense fallback={<p className="meta">Загрузка таблицы…</p>}>
+          <CollabSheet ydoc={ydoc} docName={docName} />
+        </Suspense>
       )}
       {editorMode === 'yjs' && !err && !ready && <p className="meta">Подключение к совместному редактированию…</p>}
     </div>

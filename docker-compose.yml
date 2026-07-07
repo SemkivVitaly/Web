@@ -1,17 +1,16 @@
 # LocalChat: API + веб + OnlyOffice (документы Word/Excel в группах).
 #
 # Запуск:  docker compose up --build -d
-# Открыть: http://localhost:3780  · по имени: http://localchat:3780 (см. docs/LAN-HOSTNAME.md)
-# OnlyOffice: порт на хосте задаётся ONLYOFFICE_PORT в .env (по умолчанию 8081), внутри контейнера всегда :80
+# HTTP:    http://localhost:3780
+# OnlyOffice: порт на хосте задаётся ONLYOFFICE_PORT в .env (по умолчанию 8081)
 #
 # Доступ с других устройств в LAN:
-#   1) В .env укажите LAN_HOST=<IP этого ПК в Wi‑Fi/Ethernet> (например 192.168.1.10).
-#   2) С телефона/ноутбука откройте http://<LAN_HOST>:3780
-#   Без LAN_HOST по умолчанию OnlyOffice в браузере остаётся на localhost — с других ПК не откроется.
+#   1) В .env укажите LAN_HOST=<IP этого ПК>
+#   2) http://<LAN_HOST>:3780
 #
-# Отключить OnlyOffice (только встроенный редактор): в .env укажите
-#   ONLYOFFICE_DOCUMENT_SERVER_URL=
-# или удалите сервис onlyoffice и задайте пустую переменную через override.
+# OnlyOffice JWT (опционально, для production):
+#   В onlyoffice.environment задайте JWT_ENABLED: 'true' и JWT_SECRET, совпадающий с ONLYOFFICE_JWT_SECRET на API.
+#   По умолчанию JWT отключён — локальный Docker работает без доп. настройки.
 
 services:
   localchat:
@@ -26,12 +25,10 @@ services:
       PORT: '3780'
       HOST: 0.0.0.0
       JWT_SECRET: ${JWT_SECRET:-docker-dev-change-jwt-secret}
-      # В production список origin обязателен; для LAN добавьте http://<LAN_HOST>:3780 через переменную ниже
+      # Plain HTTP LAN: do not set Secure cookies or CSP upgrade-insecure-requests (see USE_HTTPS / COOKIE_SECURE).
+      COOKIE_SECURE: ${COOKIE_SECURE:-0}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3780,http://127.0.0.1:3780,http://localchat:3780,http://${LAN_HOST:-localhost}:3780}
-      # Скрипт редактора в браузере — тот же порт, что в onlyoffice.ports (ONLYOFFICE_PORT → хост, внутри :80)
       ONLYOFFICE_DOCUMENT_SERVER_URL: ${ONLYOFFICE_DOCUMENT_SERVER_URL:-http://${LAN_HOST:-localhost}:${ONLYOFFICE_PORT:-8081}}
-      # URL API для скачивания файла и callback — с контейнера onlyoffice надёжнее имя сервиса compose (не host.docker.internal:
-      # на части хостов/WSL фаервол ломает доступ к API, документы не открываются). LAN_HOST ниже — только для браузера и CORS.
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localchat:3780}
     volumes:
       - localchat_data:/app/server/data

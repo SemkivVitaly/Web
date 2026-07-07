@@ -18,6 +18,7 @@ import { upload, decodeMultipartFilename } from './upload.js';
 import { checkCollabDocAccess, getOrCreateYDoc, evictCollabDoc } from './collabSync.js';
 import * as Y from 'yjs';
 import { writeAudit } from './auditLog.js';
+import { uploadBasenameApiUrl } from './fileAccess.js';
 
 // --- Внутренние хелперы: аудит, членство, канбан sync/hydrate, дерево задач, удаление коллаб-дерева ---
 
@@ -43,7 +44,7 @@ function rowUser(u) {
     displayName: u.display_name,
     tag: u.tag,
     bio: u.bio || '',
-    avatarUrl: u.avatar_file ? `/uploads/${u.avatar_file}` : null,
+    avatarUrl: u.avatar_file ? uploadBasenameApiUrl(u.avatar_file) : null,
   };
 }
 
@@ -159,7 +160,7 @@ function hydrateCanvasItem(db, row, groupId, viewerId) {
     title: row.title || '',
     taskId: row.task_id,
     collabDocumentId: row.collab_document_id,
-    fileUrl: row.file_stored_name ? `/uploads/${row.file_stored_name}` : null,
+    fileUrl: row.file_stored_name ? uploadBasenameApiUrl(row.file_stored_name) : null,
     fileName: row.file_original_name,
     fileMime: row.file_mime,
     parentItemId: row.parent_item_id,
@@ -586,7 +587,7 @@ export function appendWorkspaceRoutes(r, io) {
           prevBase &&
           prevBase === String(x.preview_stored_name).trim() &&
           !prevBase.includes('..')
-            ? `/uploads/${prevBase}`
+            ? uploadBasenameApiUrl(prevBase)
             : null;
         const imageDocument =
           x.doc_type === 'richtext' &&
@@ -748,7 +749,7 @@ export function appendWorkspaceRoutes(r, io) {
     const previewBase = row.preview_stored_name ? path.basename(String(row.preview_stored_name)) : '';
     const previewImageUrl =
       previewBase && previewBase === String(row.preview_stored_name).trim() && !previewBase.includes('..')
-        ? `/uploads/${previewBase}`
+        ? uploadBasenameApiUrl(previewBase)
         : null;
     const imageDocument =
       row.doc_type === 'richtext' &&
@@ -811,7 +812,7 @@ export function appendWorkspaceRoutes(r, io) {
     const name = path.basename(req.file.filename);
     if (!name || name.includes('..')) return res.status(500).json({ error: 'file' });
     db.prepare(`UPDATE collab_documents SET preview_stored_name = ? WHERE id = ?`).run(name, id);
-    res.json({ url: `/uploads/${name}` });
+    res.json({ url: uploadBasenameApiUrl(name) });
   });
 
   w.get('/collab-docs/:id/state', requireAuth, (req, res) => {
@@ -1477,7 +1478,7 @@ export function appendWorkspaceRoutes(r, io) {
     emitTasksRefresh(io, row.group_id, row.board_id);
     res.json({
       id: info.lastInsertRowid,
-      url: `/uploads/${req.file.filename}`,
+      url: uploadBasenameApiUrl(req.file.filename),
       fileName: origName,
       mimeType: req.file.mimetype,
     });
@@ -1494,7 +1495,7 @@ export function appendWorkspaceRoutes(r, io) {
     res.json(
       rows.map((x) => ({
         id: x.id,
-        url: `/uploads/${x.stored_name}`,
+        url: uploadBasenameApiUrl(x.stored_name),
         fileName: x.file_name,
         mimeType: x.mime_type,
         createdAt: x.created_at,

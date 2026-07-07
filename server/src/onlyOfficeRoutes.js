@@ -1,7 +1,7 @@
 /**
  * @fileoverview Интеграция OnlyOffice Document Server: конфигурация редактора, выдача файлов по JWT, импорт через Conversion API,
  * callback сохранения. Зависит от `ONLYOFFICE_DOCUMENT_SERVER_URL`. Базовый URL API для ссылок, которые скачивает DS:
- * `PUBLIC_BASE_URL` либо авто из `Host` (при `TRUST_PROXY=1` — `X-Forwarded-*`). Опционально `ONLYOFFICE_JWT_SECRET` для подписи
+ * `PUBLIC_BASE_URL` либо авто из `Host` запроса. Опционально `ONLYOFFICE_JWT_SECRET` для подписи
  * запросов к converter. Подключается из `routes.js` через `appendOnlyOfficeRoutes`.
  */
 
@@ -229,34 +229,18 @@ function ooBaseUrl() {
 /**
  * Базовый URL API для ссылок, которые Document Server скачивает по HTTP (документ, callback, import source).
  * 1) `PUBLIC_BASE_URL` — явно (Docker: имя сервиса, host.docker.internal, LAN IP с точки зрения контейнера DS).
- * 2) Иначе — из запроса: `Host` + `req.protocol`; при `TRUST_PROXY=1` учитываются `X-Forwarded-Host` / `X-Forwarded-Proto`.
+ * 2) Иначе — из запроса: `Host` (всегда HTTP).
  */
 function publicBaseUrlFromRequest(req) {
   const fixed = (process.env.PUBLIC_BASE_URL || '').trim().replace(/\/$/, '');
   if (fixed) return fixed;
 
-  const trust = process.env.TRUST_PROXY === '1';
-  let host = (req.get('host') || '').trim();
-  if (trust) {
-    const xfHost = String(req.get('x-forwarded-host') || '')
-      .split(',')[0]
-      .trim();
-    if (xfHost) host = xfHost;
-  }
+  const host = (req.get('host') || '').trim();
   if (!host) {
     const port = process.env.PORT || 3780;
     return `http://127.0.0.1:${port}`;
   }
-
-  let proto = req.protocol === 'https' ? 'https' : 'http';
-  if (trust) {
-    const xfProto = String(req.get('x-forwarded-proto') || '')
-      .split(',')[0]
-      .trim()
-      .toLowerCase();
-    if (xfProto === 'http' || xfProto === 'https') proto = xfProto;
-  }
-  return `${proto}://${host}`;
+  return `http://${host}`;
 }
 
 function parseOoKey(key) {
