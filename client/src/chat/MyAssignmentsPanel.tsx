@@ -4,7 +4,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
-import { AnnouncementCardBody, type GroupAnnouncement } from './AnnouncementModals';
+import { AnnouncementCardBody, type AnnouncementAttachment, type GroupAnnouncement } from './AnnouncementModals';
 
 function taskStatusLabel(s: string | null | undefined): string {
   if (s === 'in_progress') return 'В работе';
@@ -26,12 +26,41 @@ function formatWhen(iso: string): string {
   }
 }
 
+function deriveStatusFromWork(
+  progress: number,
+  quantityDone: number,
+  quantityTarget: number | null | undefined
+): 'todo' | 'in_progress' | 'done' {
+  if (quantityTarget != null && quantityTarget > 0) {
+    if (quantityDone >= quantityTarget) return 'done';
+    if (quantityDone > 0) return 'in_progress';
+    return 'todo';
+  }
+  if (progress >= 100) return 'done';
+  if (progress > 0) return 'in_progress';
+  return 'todo';
+}
+
+type EditState = {
+  taskStatus: string;
+  progress: number;
+  quantityDone: number;
+  note: string;
+  /** Снимок с сервера — чтобы понять, менялся ли прогресс/кол-во. */
+  savedProgress: number;
+  savedQuantityDone: number;
+  savedTaskStatus: string;
+};
+
 export function MyAssignmentsPanel({
   groupId,
   open,
   onClose,
   refreshKey,
   onOpenLinkedTask,
+  onOpenImage,
+  onOpenOnlyOffice,
+  ooEnabled,
   onUpdated,
 }: {
   groupId: number;
@@ -39,6 +68,9 @@ export function MyAssignmentsPanel({
   onClose: () => void;
   refreshKey: number;
   onOpenLinkedTask?: (taskId: number, boardId: number) => void;
+  onOpenImage?: (attachments: AnnouncementAttachment[], attachmentId: number) => void;
+  onOpenOnlyOffice?: (attachmentId: number, fileName: string) => void;
+  ooEnabled?: boolean;
   onUpdated?: () => void;
 }) {
   const [items, setItems] = useState<GroupAnnouncement[]>([]);
@@ -46,9 +78,7 @@ export function MyAssignmentsPanel({
   const [err, setErr] = useState('');
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
-  const [editState, setEditState] = useState<
-    Record<number, { taskStatus: string; progress: number; quantityDone: number; note: string }>
-  >({});
+  const [editState, setEditState] = useState<Record<number, EditState>>({});
 
   const load = useCallback(() => {
     if (!open) return;
@@ -59,16 +89,21 @@ export function MyAssignmentsPanel({
         const list = Array.isArray(rows) ? rows : [];
         setItems(list);
         setEditState((prev) => {
-          const next = { ...prev };
+          const next: Record<number, EditState> = {};
           for (const a of list) {
-            if (!next[a.id]) {
-              next[a.id] = {
-                taskStatus: a.myTaskStatus || 'todo',
-                progress: a.myProgress ?? 0,
-                quantityDone: a.myQuantityDone ?? 0,
-                note: '',
-              };
-            }
+            const progress = a.myProgress ?? 0;
+            const quantityDone = a.myQuantityDone ?? 0;
+            const taskStatus = a.myTaskStatus || 'todo';
+            const keepNote = prev[a.id]?.note ?? '';
+            next[a.id] = {
+              taskStatus,
+              progress,
+              quantityDone,
+              note: keepNote,
+              savedProgress: progress,
+              savedQuantityDone: quantityDone,
+              savedTaskStatus: taskStatus,
+            };
           }
           return next;
         });
@@ -84,20 +119,64 @@ export function MyAssignmentsPanel({
     void load();
   }, [load, refreshKey]);
 
-  async function saveProgress(item: GroupAnnouncement) {
+  function patchWork(
+    item: GroupAnnouncement,
+    patch: Partial<Pick<EditState, 'progress' | 'quantityDone'>>
+  ) {
+    setEditState((prev) => {
+      const st = prev[item.id];
+      if (!st) return prev;
+      const progress = patch.progress ?? st.progress;
+      const quantityDone = patch.quantityDone ?? st.quantityDone;
+      const taskStatus = deriveStatusFromWork(progress, quantityDone, item.quantityTarget);
+      return {
+        ...prev,
+        [item.id]: { ...st, progress, quantityDone, taskStatus },
+      };
+    });
+  }
+
+  async function saveProgress(item: GroupAnnouncement, mode: 'progress' | 'comment') {
     const st = editState[item.id];
     if (!st || busyId != null) return;
+    const note = st.note.trim();
+    const qtyChanged = st.quantityDone !== st.savedQuantityDone;
+    const progressChanged = st.progress !== st.savedProgress;
+    const statusChanged = st.taskStatus !== st.savedTaskStatus;
+    const hasQtyTarget = item.quantityTarget != null && item.quantityTarget > 0;
+
+    if (mode === 'comment') {
+      if (!note) {
+        setErr('Введите комментарий');
+        return;
+      }
+    } else if (!qtyChanged && !progressChanged && !statusChanged && !note) {
+      setErr('Измените прогресс или добавьте комментарий');
+      return;
+    }
+
     setBusyId(item.id);
     setErr('');
     try {
+      const json: Record<string, unknown> = {};
+      if (mode === 'comment') {
+        json.note = note;
+      } else {
+        if (hasQtyTarget && qtyChanged) json.quantityDone = st.quantityDone;
+        if (!hasQtyTarget && progressChanged) json.progress = st.progress;
+        if (statusChanged && !qtyChanged && !progressChanged) {
+          json.taskStatus = st.taskStatus;
+        }
+        if (note) json.note = note;
+      }
       await api(`/api/announcements/${item.id}/progress`, {
         method: 'POST',
-        json: {
-          taskStatus: st.taskStatus,
-          progress: st.progress,
-          quantityDone: st.quantityDone,
-          note: st.note.trim() || undefined,
-        },
+        json,
+      });
+      setEditState((prev) => {
+        const cur = prev[item.id];
+        if (!cur) return prev;
+        return { ...prev, [item.id]: { ...cur, note: '' } };
       });
       onUpdated?.();
       await load();
@@ -112,7 +191,7 @@ export function MyAssignmentsPanel({
 
   return (
     <div
-      className="modal-backdrop"
+      className="modal-backdrop lc-my-assignments-modal-backdrop"
       role="presentation"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
@@ -156,7 +235,12 @@ export function MyAssignmentsPanel({
                   </button>
                   {isExpanded && (
                     <div className="lc-my-assignments-item-body">
-                      <AnnouncementCardBody item={item} />
+                      <AnnouncementCardBody
+                        item={item}
+                        onOpenImage={onOpenImage}
+                        onOpenOnlyOffice={onOpenOnlyOffice}
+                        ooEnabled={ooEnabled}
+                      />
                       {!isLinked && st && (
                         <div className="lc-my-assignments-form">
                           <label>
@@ -176,6 +260,9 @@ export function MyAssignmentsPanel({
                               <option value="done">Выполнено</option>
                             </select>
                           </label>
+                          <p className="meta lc-my-assignments-status-hint">
+                            При изменении прогресса статус сам станет «В работе» или «Выполнено».
+                          </p>
                           {item.quantityTarget != null && item.quantityTarget > 0 ? (
                             <label>
                               Выполнено ({item.quantityTarget})
@@ -186,13 +273,12 @@ export function MyAssignmentsPanel({
                                 value={st.quantityDone}
                                 disabled={busyId === item.id}
                                 onChange={(e) =>
-                                  setEditState((prev) => ({
-                                    ...prev,
-                                    [item.id]: {
-                                      ...st,
-                                      quantityDone: Math.max(0, +e.target.value),
-                                    },
-                                  }))
+                                  patchWork(item, {
+                                    quantityDone: Math.min(
+                                      item.quantityTarget!,
+                                      Math.max(0, +e.target.value || 0)
+                                    ),
+                                  })
                                 }
                               />
                             </label>
@@ -205,12 +291,7 @@ export function MyAssignmentsPanel({
                                 max={100}
                                 value={st.progress}
                                 disabled={busyId === item.id}
-                                onChange={(e) =>
-                                  setEditState((prev) => ({
-                                    ...prev,
-                                    [item.id]: { ...st, progress: +e.target.value },
-                                  }))
-                                }
+                                onChange={(e) => patchWork(item, { progress: +e.target.value })}
                               />
                             </label>
                           )}
@@ -229,14 +310,23 @@ export function MyAssignmentsPanel({
                               placeholder="Комментарий к обновлению…"
                             />
                           </label>
-                          <button
-                            type="button"
-                            className="primary"
-                            disabled={busyId === item.id}
-                            onClick={() => void saveProgress(item)}
-                          >
-                            {busyId === item.id ? 'Сохранение…' : 'Обновить прогресс'}
-                          </button>
+                          <div className="lc-my-assignments-form-actions">
+                            <button
+                              type="button"
+                              className="primary"
+                              disabled={busyId === item.id}
+                              onClick={() => void saveProgress(item, 'progress')}
+                            >
+                              {busyId === item.id ? 'Сохранение…' : 'Обновить прогресс'}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busyId === item.id || !st.note.trim()}
+                              onClick={() => void saveProgress(item, 'comment')}
+                            >
+                              Только комментарий
+                            </button>
+                          </div>
                         </div>
                       )}
                       {isLinked && item.linkedTask && onOpenLinkedTask && (
@@ -250,14 +340,17 @@ export function MyAssignmentsPanel({
                         </button>
                       )}
                       {item.progressLog && item.progressLog.length > 0 && (
-                        <details className="lc-my-assignments-history">
+                        <details className="lc-my-assignments-history" open>
                           <summary>История обновлений</summary>
                           <ul>
                             {item.progressLog.map((log) => (
                               <li key={log.id}>
                                 <span className="meta">{formatWhen(log.createdAt)}</span>
                                 {' · '}
-                                {taskStatusLabel(log.taskStatus)} · {log.progress ?? 0}%
+                                {taskStatusLabel(log.taskStatus)}
+                                {item.quantityTarget != null && item.quantityTarget > 0
+                                  ? ` · ${log.quantityDone ?? 0}/${item.quantityTarget}`
+                                  : ` · ${log.progress ?? 0}%`}
                                 {log.note ? ` — ${log.note}` : ''}
                               </li>
                             ))}

@@ -87,6 +87,10 @@ export type GroupSummary = {
   hasPassword: boolean;
   role: string;
   createdAt: string;
+  /** Id пользователя, создавшего группу */
+  createdById?: number;
+  /** Текущий пользователь — создатель чата */
+  isCreator?: boolean;
   forwardLocked?: boolean;
   invitePolicy?: InvitePolicy;
   /** Только у администратора в ответе API */
@@ -204,6 +208,8 @@ export type TaskNode = {
   updatedAt: string;
   /** Вложенность при ответе API дерева задач */
   children?: TaskNode[];
+  /** Имя доски — в обзорном канбане группы */
+  boardName?: string;
 };
 
 export type TaskCanvasItem = {

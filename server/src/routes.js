@@ -26,6 +26,11 @@ import { appendOnlyOfficeRoutes } from './onlyOfficeRoutes.js';
 import { appendAnnouncementRoutes } from './announcementRoutes.js';
 import { createRateLimiter } from './rateLimit.js';
 import { unlinkOrphanMessageAttachmentFiles } from './uploadCleanup.js';
+import {
+  archiveGroupFull,
+  archiveDirectEvent,
+  archiveMessagesBulk,
+} from './chatArchive.js';
 import { appendFileRoutes, uploadBasenameApiUrl, attachmentApiUrl } from './fileAccess.js';
 import { buildMessagesPayloadList, buildMessagePayloadOne } from './messagePayloadBatch.js';
 import { insertMessageAttachmentRows } from './messageAttachments.js';
@@ -435,6 +440,17 @@ export function createApiRouter(io) {
         `SELECT role, banned_until FROM group_members WHERE group_id = ? AND user_id = ?`
       )
       .get(groupId, userId);
+  }
+
+  function getGroupCreatorId(groupId) {
+    const g = db.prepare(`SELECT created_by FROM groups WHERE id = ?`).get(groupId);
+    return g?.created_by != null ? +g.created_by : null;
+  }
+
+  /** Создатель чата: другие админы не могут снимать роль / банить / исключать. */
+  function isGroupCreator(groupId, userId) {
+    const creatorId = getGroupCreatorId(groupId);
+    return creatorId != null && creatorId === +userId;
   }
 
   function isActiveGroupMember(groupId, userId) {
@@ -849,6 +865,8 @@ export function createApiRouter(io) {
           hasPassword: !!g.password_hash,
           role: g.role,
           createdAt: sqliteUtcToIso(g.created_at) ?? g.created_at,
+          createdById: g.created_by,
+          isCreator: g.created_by === uid,
           forwardLocked: !!g.forward_locked,
           invitePolicy: g.invite_policy || 'all',
           joinCode: g.role === 'admin' ? (g.join_code || null) : null,
@@ -879,16 +897,65 @@ export function createApiRouter(io) {
       hasPassword: !!g.password_hash,
       role: chk.role,
       createdAt: sqliteUtcToIso(g.created_at) ?? g.created_at,
+      createdById: g.created_by,
+      isCreator: g.created_by === req.userId,
       forwardLocked: !!g.forward_locked,
       invitePolicy: g.invite_policy || 'all',
       joinCode: chk.role === 'admin' ? (g.join_code || null) : null,
     });
   });
 
+  r.delete('/groups/:id', requireAuth, (req, res) => {
+    const gid = +req.params.id;
+    const chk = requireGroupMember(gid, req.userId, 'admin');
+    if (!chk.ok) return res.status(403).json({ error: chk.error });
+    if (!isGroupCreator(gid, req.userId)) {
+      return res.status(403).json({ error: 'Удалить группу может только создатель чата' });
+    }
+    const g = db.prepare(`SELECT id, name FROM groups WHERE id = ?`).get(gid);
+    if (!g) return res.status(404).json({ error: 'Группа не найдена' });
+
+    // Снимок для администратора сервера (uploads/archives/groups/…) до CASCADE-удаления.
+    const archived = archiveGroupFull(db, gid, req.userId);
+    if (!archived) {
+      console.error('[chatArchive] group delete aborted: archive failed', gid);
+      return res.status(500).json({ error: 'Не удалось сохранить архив группы перед удалением' });
+    }
+
+    const memberIds = db
+      .prepare(`SELECT user_id AS id FROM group_members WHERE group_id = ?`)
+      .all(gid)
+      .map((r) => r.id);
+
+    writeAudit(db, req.userId, 'group_delete', 'group', gid, {
+      name: g.name,
+      archiveDir: archived.dir,
+    });
+
+    const payload = { groupId: gid, name: g.name };
+    for (const uid of memberIds) {
+      emitToUser(uid, 'group:deleted', payload);
+    }
+    io.to(`group:${gid}`).emit('group:deleted', payload);
+
+    const tx = db.transaction(() => {
+      db.prepare(`DELETE FROM user_chat_prefs WHERE chat_kind = 'group' AND chat_id = ?`).run(gid);
+      db.prepare(`DELETE FROM audit_log WHERE target_kind = 'group' AND target_id = ?`).run(gid);
+      db.prepare(`DELETE FROM groups WHERE id = ?`).run(gid);
+    });
+    tx();
+    res.json({ ok: true, archived: true });
+  });
+
   r.post('/groups/:id/leave', requireAuth, (req, res) => {
     const gid = +req.params.id;
     const m = getMembership(gid, req.userId);
     if (!m) return res.status(404).json({ error: 'Не состоите в группе' });
+    if (isGroupCreator(gid, req.userId)) {
+      return res
+        .status(400)
+        .json({ error: 'Создатель не может покинуть чат. Удалите группу в настройках администрирования.' });
+    }
     const leaver = db.prepare(`SELECT display_name FROM users WHERE id = ?`).get(req.userId);
     const dn = String(leaver?.display_name || 'Пользователь').trim().slice(0, 200) || 'Пользователь';
     const leaveBody = `Пользователь ${dn} покинул чат`;
@@ -991,11 +1058,15 @@ export function createApiRouter(io) {
     if (!chk.ok) return res.status(403).json({ error: chk.error });
     const tmem = getMembership(gid, tid);
     if (!tmem) return res.status(404).json({ error: 'Пользователь не в группе' });
+    if (isGroupCreator(gid, tid)) {
+      return res.status(403).json({ error: 'Нельзя исключить создателя чата' });
+    }
     if (tmem.role === 'admin' && chk.role !== 'admin')
       return res.status(403).json({ error: 'Нельзя исключить администратора' });
     if (tid === req.userId) return res.status(400).json({ error: 'Используйте выход из группы' });
     db.prepare(`DELETE FROM group_members WHERE group_id = ? AND user_id = ?`).run(gid, tid);
     emitToUser(tid, 'group:kicked', { groupId: gid });
+    io.to(`group:${gid}`).emit('group:memberLeft', { groupId: gid, userId: tid });
     writeAudit(db, req.userId, 'group_kick', 'group', gid, { targetUserId: tid });
     res.json({ ok: true });
   });
@@ -1027,6 +1098,9 @@ export function createApiRouter(io) {
     const chk = requireGroupMember(gid, req.userId, 'moderator');
     if (!chk.ok) return res.status(403).json({ error: chk.error });
     if (tid === req.userId) return res.status(400).json({ error: 'Нельзя забанить самого себя' });
+    if (isGroupCreator(gid, tid)) {
+      return res.status(403).json({ error: 'Нельзя забанить создателя чата' });
+    }
     const tmem = getMembership(gid, tid);
     if (tmem && tmem.role === 'admin' && chk.role !== 'admin')
       return res.status(403).json({ error: 'Нельзя забанить администратора' });
@@ -1072,6 +1146,9 @@ export function createApiRouter(io) {
     if (!['admin', 'moderator', 'member'].includes(role)) return res.status(400).json({ error: 'Роль' });
     const tmem = getMembership(gid, tid);
     if (!tmem) return res.status(404).json({ error: 'Пользователь не в группе' });
+    if (isGroupCreator(gid, tid)) {
+      return res.status(403).json({ error: 'Нельзя изменить роль создателя чата' });
+    }
     db.prepare(`UPDATE group_members SET role = ? WHERE group_id = ? AND user_id = ?`).run(
       role,
       gid,
@@ -1411,7 +1488,28 @@ export function createApiRouter(io) {
       const d = db.prepare(`SELECT * FROM direct_conversations WHERE id = ?`).get(cid);
       if (!d || (d.user_low_id !== req.userId && d.user_high_id !== req.userId))
         return res.status(403).json({ error: 'Нет доступа к чату' });
-      db.prepare(`DELETE FROM messages WHERE direct_id = ? AND sender_id = ?`).run(cid, req.userId);
+      const toWipe = db
+        .prepare(`SELECT * FROM messages WHERE direct_id = ? AND sender_id = ? ORDER BY id ASC`)
+        .all(cid, req.userId);
+      if (toWipe.length) {
+        archiveDirectEvent(db, {
+          directId: cid,
+          event: 'hide_delete_my_messages',
+          actorUserId: req.userId,
+          messages: toWipe,
+        });
+        const snRows = db
+          .prepare(
+            `SELECT DISTINCT a.stored_name AS s, a.thumb_stored_name AS t
+             FROM message_attachments a
+             JOIN messages m ON m.id = a.message_id
+             WHERE m.direct_id = ? AND m.sender_id = ?`
+          )
+          .all(cid, req.userId);
+        const names = snRows.flatMap((r) => [r.s, r.t].filter(Boolean));
+        db.prepare(`DELETE FROM messages WHERE direct_id = ? AND sender_id = ?`).run(cid, req.userId);
+        unlinkOrphanMessageAttachmentFiles(db, names);
+      }
       const clearedPayload = {
         chatKind: 'direct',
         chatId: cid,
@@ -1555,6 +1653,16 @@ export function createApiRouter(io) {
     if (chatKind === 'group') {
       const asMod = requireGroupMember(cid, req.userId, 'moderator');
       if (asMod.ok) {
+        const msgRows = db
+          .prepare(`SELECT * FROM messages WHERE group_id = ? ORDER BY id ASC`)
+          .all(cid);
+        archiveMessagesBulk(db, {
+          chatKind: 'group',
+          chatId: cid,
+          event: 'chat_clear_all',
+          actorUserId: req.userId,
+          messageRows: msgRows,
+        });
         const snRows = db
           .prepare(
             `SELECT DISTINCT a.stored_name AS s FROM message_attachments a
@@ -1576,6 +1684,16 @@ export function createApiRouter(io) {
       }
       const asMember = requireGroupMember(cid, req.userId, 'member');
       if (!asMember.ok) return res.status(403).json({ error: asMember.error });
+      const msgOwn = db
+        .prepare(`SELECT * FROM messages WHERE group_id = ? AND sender_id = ? ORDER BY id ASC`)
+        .all(cid, req.userId);
+      archiveMessagesBulk(db, {
+        chatKind: 'group',
+        chatId: cid,
+        event: 'chat_clear_own',
+        actorUserId: req.userId,
+        messageRows: msgOwn,
+      });
       const snOwn = db
         .prepare(
           `SELECT DISTINCT a.stored_name AS s FROM message_attachments a
@@ -1599,6 +1717,15 @@ export function createApiRouter(io) {
     const d = db.prepare(`SELECT * FROM direct_conversations WHERE id = ?`).get(cid);
     if (!d || (d.user_low_id !== req.userId && d.user_high_id !== req.userId))
       return res.status(403).json({ error: 'Нет доступа к чату' });
+    const msgDir = db
+      .prepare(`SELECT * FROM messages WHERE direct_id = ? AND sender_id = ? ORDER BY id ASC`)
+      .all(cid, req.userId);
+    archiveDirectEvent(db, {
+      directId: cid,
+      event: 'chat_clear_own',
+      actorUserId: req.userId,
+      messages: msgDir,
+    });
     const snDir = db
       .prepare(
         `SELECT DISTINCT a.stored_name AS s FROM message_attachments a
@@ -2599,12 +2726,25 @@ export function createApiRouter(io) {
       const isMod = requireGroupMember(msg.group_id, req.userId, 'moderator').ok;
       if (!isMod && msg.sender_id !== req.userId)
         return res.status(403).json({ error: 'Удалять может автор или модератор/админ' });
+      archiveMessagesBulk(db, {
+        chatKind: 'group',
+        chatId: msg.group_id,
+        event: 'message_delete',
+        actorUserId: req.userId,
+        messageRows: [msg],
+      });
     } else if (msg.direct_id) {
       const d = db.prepare(`SELECT * FROM direct_conversations WHERE id = ?`).get(msg.direct_id);
       if (!d || (d.user_low_id !== req.userId && d.user_high_id !== req.userId))
         return res.status(403).json({ error: 'Нет доступа' });
       if (msg.sender_id !== req.userId)
         return res.status(403).json({ error: 'В личном чате можно удалить только своё сообщение' });
+      archiveDirectEvent(db, {
+        directId: msg.direct_id,
+        event: 'message_delete',
+        actorUserId: req.userId,
+        messages: [msg],
+      });
     } else return res.status(400).json({ error: '?' });
     deleteMessageWithAttachmentCleanup(mid);
     const payload = { id: mid, groupId: msg.group_id, directId: msg.direct_id };
@@ -2638,6 +2778,19 @@ export function createApiRouter(io) {
     const hasForward = !!(msg.forward_preview_json && String(msg.forward_preview_json).trim());
     if (!bodyTrimmed && attCount === 0 && !hasForward) {
       return res.status(400).json({ error: 'Пустое сообщение' });
+    }
+    // В личке сохраняем прежний текст до перезаписи — для администратора сервера.
+    if (msg.direct_id) {
+      archiveDirectEvent(db, {
+        directId: msg.direct_id,
+        event: 'message_edit',
+        actorUserId: req.userId,
+        messages: [msg],
+        extra: {
+          previousBody: msg.body || '',
+          newBody: bodyTrimmed,
+        },
+      });
     }
     db.prepare(`UPDATE messages SET body = ?, edited_at = ? WHERE id = ?`).run(bodyTrimmed, nowIso(), mid);
     db.prepare(`DELETE FROM message_mentions WHERE message_id = ?`).run(mid);

@@ -36,6 +36,41 @@ function taskOwnProgressFromRow(t) {
   return Math.min(100, Math.max(0, +(t.progress ?? 0)));
 }
 
+/**
+ * Эффективный % задачи с учётом подзадач: не выше собственного и не выше
+ * минимума среди детей (пока подзадачи не на 100%, родитель тоже не 100%).
+ */
+function taskEffectiveProgressFromDb(db, taskId) {
+  const root = db
+    .prepare(
+      `SELECT id, board_id, parent_id, progress, quantity_target, quantity_done FROM tasks WHERE id = ?`
+    )
+    .get(taskId);
+  if (!root) return 0;
+  const rows = db
+    .prepare(
+      `SELECT id, parent_id, progress, quantity_target, quantity_done FROM tasks WHERE board_id = ?`
+    )
+    .all(root.board_id);
+  const byId = Object.fromEntries(rows.map((t) => [t.id, t]));
+  const children = {};
+  for (const t of rows) {
+    const p = t.parent_id || 0;
+    if (!children[p]) children[p] = [];
+    children[p].push(t.id);
+  }
+  function dfs(id) {
+    const row = byId[id];
+    if (!row) return 0;
+    const own = taskOwnProgressFromRow(row);
+    const subs = children[id] || [];
+    if (!subs.length) return own;
+    const childEffs = subs.map((cid) => dfs(cid));
+    return Math.min(own, Math.min(...childEffs));
+  }
+  return dfs(taskId);
+}
+
 function rowUser(u) {
   if (!u) return null;
   return {
@@ -187,16 +222,19 @@ function hydrateCanvasItem(db, row, groupId, viewerId) {
       .get(row.task_id);
     if (t) {
       const own = taskOwnProgressFromRow(t);
+      const effective = taskEffectiveProgressFromDb(db, row.task_id);
       const qty =
         t.quantity_target != null && t.quantity_target > 0
           ? ` · ${t.quantity_done ?? 0}/${t.quantity_target}`
           : '';
+      const progressLabel =
+        effective !== own ? `${effective}% (свой ${own}%)` : `${effective}%`;
       base.displayTitle = t.title;
-      base.previewLine = `${t.status} · ${own}%${qty}`;
+      base.previewLine = `${t.status} · ${progressLabel}${qty}`;
       base.taskPreview = {
         description: (t.description || '').slice(0, 400),
         status: t.status,
-        progress: own,
+        progress: effective,
       };
     }
   } else if (row.kind === 'collab_doc' && row.collab_document_id) {
@@ -629,6 +667,38 @@ export function appendWorkspaceRoutes(r, io) {
         boardHasPassword: !!x.password_hash,
       }))
     );
+  });
+
+  /**
+   * Обзорный канбан по группе: задачи со всех досок без пароля.
+   * Query: rootsOnly=1 — только корневые задачи (без подзадач в колонках).
+   */
+  w.get('/groups/:groupId/tasks-overview-kanban', requireAuth, (req, res) => {
+    const gid = +req.params.groupId;
+    const chk = requireGroupMember(db, gid, req.userId);
+    if (!chk.ok) return res.status(403).json({ error: chk.error });
+    const rootsOnly = req.query.rootsOnly === '1' || req.query.rootsOnly === 'true';
+    const rows = db
+      .prepare(
+        `SELECT t.*, b.name AS board_name
+         FROM tasks t
+         JOIN task_boards b ON b.id = t.board_id
+         WHERE b.group_id = ? AND (b.password_hash IS NULL OR b.password_hash = '')
+         ${rootsOnly ? 'AND t.parent_id IS NULL' : ''}
+         ORDER BY b.name COLLATE NOCASE,
+           CASE WHEN t.parent_id IS NULL THEN 0 ELSE 1 END,
+           t.parent_id, t.sort_order, t.id`
+      )
+      .all(gid);
+    const boardNameById = new Map();
+    for (const r of rows) {
+      if (!boardNameById.has(r.board_id)) boardNameById.set(r.board_id, r.board_name || '');
+    }
+    const list = buildTaskTreeWithRollup(rows, db).map((node) => ({
+      ...node,
+      boardName: boardNameById.get(node.boardId) || '',
+    }));
+    res.json(list);
   });
 
   w.get('/groups/:groupId/collab-docs', requireAuth, (req, res) => {
@@ -1260,7 +1330,17 @@ export function appendWorkspaceRoutes(r, io) {
         return res.status(400).json({ error: 'У задачи нет цели по количеству' });
       }
       if (!Number.isFinite(addN) || addN <= 0) return res.status(400).json({ error: 'quantityAdd' });
-      qtyDone = Math.min(qtyTarget, qtyDone + Math.floor(addN));
+      if (qtyDone >= qtyTarget) {
+        return res.status(400).json({ error: 'Счётчик уже заполнен' });
+      }
+      const room = qtyTarget - qtyDone;
+      const addFloor = Math.floor(addN);
+      if (addFloor > room) {
+        return res.status(400).json({
+          error: `Можно добавить не больше ${room} (осталось ${room} из ${qtyTarget})`,
+        });
+      }
+      qtyDone = qtyDone + addFloor;
     }
 
     let progN = row.progress;

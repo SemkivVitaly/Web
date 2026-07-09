@@ -570,42 +570,46 @@ export function GroupWorkspace({
     [handleCollabDiskFile]
   );
 
-  // --- Полноэкранный редактор (отдельный чанк) ---
+  // --- Полноэкранный редактор (отдельный чанк), как оверлей из уведомлений ---
 
   if (openMessageAttachment) {
     return (
-      <Suspense fallback={<p className="meta lc-workspace-suspense">Загрузка просмотра…</p>}>
-        <MessageAttachmentOoView
-          attachmentId={openMessageAttachment.id}
-          fileName={openMessageAttachment.fileName}
-          ooMode={openMessageAttachment.ooMode ?? 'view'}
-          attachmentSource={openMessageAttachment.source ?? 'message'}
-          onBack={() => onCloseMessageAttachment?.()}
-        />
-      </Suspense>
+      <div className="lc-doc-fullscreen-overlay" role="presentation">
+        <Suspense fallback={<p className="meta lc-workspace-suspense">Загрузка просмотра…</p>}>
+          <MessageAttachmentOoView
+            attachmentId={openMessageAttachment.id}
+            fileName={openMessageAttachment.fileName}
+            ooMode={openMessageAttachment.ooMode ?? 'view'}
+            attachmentSource={openMessageAttachment.source ?? 'message'}
+            onBack={() => onCloseMessageAttachment?.()}
+          />
+        </Suspense>
+      </div>
     );
   }
 
   if (selected) {
     const pw = isMod || !selected.hasPassword ? '' : passwords[selected.id] ?? '';
     return (
-      <Suspense fallback={<p className="meta lc-workspace-suspense">Загрузка редактора…</p>}>
-        <CollabDocView
-          docId={selected.id}
-          docType={selected.docType}
-          docName={selected.name}
-          docDescription={selected.description ?? ''}
-          canEditMeta={selected.createdById === me.id || isMod}
-          password={pw}
-          folderPassword={isMod ? undefined : folderPasswordForOpenDoc || undefined}
-          socket={socket}
-          onBack={() => {
-            setSelected(null);
-            if (returnToTasksOnClose) onReturnFromDocument?.();
-          }}
-          onMetaSaved={() => void refresh()}
-        />
-      </Suspense>
+      <div className="lc-doc-fullscreen-overlay" role="presentation">
+        <Suspense fallback={<p className="meta lc-workspace-suspense">Загрузка редактора…</p>}>
+          <CollabDocView
+            docId={selected.id}
+            docType={selected.docType}
+            docName={selected.name}
+            docDescription={selected.description ?? ''}
+            canEditMeta={selected.createdById === me.id || isMod}
+            password={pw}
+            folderPassword={isMod ? undefined : folderPasswordForOpenDoc || undefined}
+            socket={socket}
+            onBack={() => {
+              setSelected(null);
+              if (returnToTasksOnClose) onReturnFromDocument?.();
+            }}
+            onMetaSaved={() => void refresh()}
+          />
+        </Suspense>
+      </div>
     );
   }
 

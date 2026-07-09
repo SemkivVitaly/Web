@@ -632,6 +632,19 @@ try {
 }
 
 try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS assignment_mod_seen (
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (user_id, group_id)
+    );
+  `);
+} catch (e) {
+  console.error('assignment_mod_seen migration', e);
+}
+
+try {
   const mai = db.prepare(`PRAGMA table_info(message_attachments)`).all();
   if (mai.length && !mai.some((c) => c.name === 'thumb_stored_name')) {
     db.exec(`ALTER TABLE message_attachments ADD COLUMN thumb_stored_name TEXT`);

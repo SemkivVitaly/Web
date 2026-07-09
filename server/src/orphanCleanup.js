@@ -43,6 +43,8 @@ export function cleanupOrphanUploadFiles(opts = {}) {
   if (!fs.existsSync(uploadsDir)) return 0;
   let removed = 0;
   for (const ent of fs.readdirSync(uploadsDir, { withFileTypes: true })) {
+    // Каталог archives/ — постоянный архив для админа сервера, не трогаем.
+    if (ent.isDirectory()) continue;
     if (!ent.isFile()) continue;
     const name = ent.name;
     if (refs.has(name)) continue;

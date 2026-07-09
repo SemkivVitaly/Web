@@ -3,6 +3,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 export type ChatImageLightboxItem = {
   url: string;
@@ -245,7 +246,7 @@ export function ChatImageLightbox({
   const canZoomOut = scale > MIN_SCALE;
   const canZoomIn = scale < MAX_SCALE;
 
-  return (
+  return createPortal(
     <div
       className="modal-backdrop lc-chat-doc-img-lightbox"
       role="presentation"
@@ -359,6 +360,7 @@ export function ChatImageLightbox({
           </button>
         )}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

@@ -22,7 +22,11 @@ import { uiConfirm, uiPrompt } from '../ui/dialogs';
 import type { CollabDocPickerRow, TaskCanvasItem, TaskNode, User } from '../types';
 import { AddItemMenu, CanvasSolutionExplorer } from './SolutionExplorer';
 import { readTaskBoardDragItemId, setTaskBoardDragItemData } from './canvasDragMime';
-import { inferCollabDocTypeFromFile, isCollabDiskImageFile } from './collabDiskFileMeta';
+import {
+  inferCollabDocTypeFromFile,
+  isCollabDiskImageFile,
+  TASK_BOARD_DOC_DISK_ACCEPT,
+} from './collabDiskFileMeta';
 
 function canvasFileUrl(url: string | null | undefined): string {
   return url ? resolveUrl(url) : '';
@@ -1211,7 +1215,7 @@ export function TaskBoardCanvas({
         type="file"
         className="lc-sr-only"
         aria-hidden
-        accept=".txt,.md,.html,.htm,.csv,.xlsx,.xls,text/plain,text/html,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        accept={TASK_BOARD_DOC_DISK_ACCEPT}
         onChange={(e) => {
           const f = e.target.files?.[0];
           e.target.value = '';

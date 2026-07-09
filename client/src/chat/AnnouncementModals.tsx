@@ -77,6 +77,7 @@ export type AnnouncementStatsMember = {
   progress?: number | null;
   quantityDone?: number | null;
   progressNote?: string | null;
+  progressLog?: ProgressLogEntry[];
 };
 
 export type AnnouncementStats = {
@@ -288,7 +289,11 @@ export function AnnouncementAckModal({
   const ackLabel = isTask ? 'Принял к исполнению' : 'Ознакомлен';
 
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={(e) => e.stopPropagation()}>
+    <div
+      className="modal-backdrop lc-announcement-ack-backdrop"
+      role="presentation"
+      onMouseDown={(e) => e.stopPropagation()}
+    >
       <div
         className="modal lc-announcement-ack-modal"
         role="dialog"
@@ -605,7 +610,7 @@ export function GroupAnnouncementsModal({
 
   return (
     <div
-      className="modal-backdrop"
+      className="modal-backdrop lc-announcements-modal-backdrop"
       role="presentation"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
@@ -898,13 +903,42 @@ export function GroupAnnouncementsModal({
                               {showTaskStats && (
                                 <td>
                                   {stats.announcement.kind === 'assignment'
-                                    ? `${m.progress ?? 0}%`
+                                    ? stats.announcement.quantityTarget != null &&
+                                      stats.announcement.quantityTarget > 0
+                                      ? `${m.quantityDone ?? 0}/${stats.announcement.quantityTarget} (${m.progress ?? 0}%)`
+                                      : `${m.progress ?? 0}%`
                                     : stats.linkedTask
                                       ? `${stats.linkedTask.progress}%`
                                       : '—'}
                                 </td>
                               )}
-                              <td>{m.progressNote || m.comment || '—'}</td>
+                              <td>
+                                {m.progressNote || m.comment || '—'}
+                                {showTaskStats &&
+                                  stats.announcement.kind === 'assignment' &&
+                                  m.progressLog &&
+                                  m.progressLog.length > 0 && (
+                                    <details className="lc-announcement-member-history">
+                                      <summary>История ({m.progressLog.length})</summary>
+                                      <ul>
+                                        {m.progressLog.map((log) => (
+                                          <li key={log.id}>
+                                            <span className="meta">
+                                              {formatAnnouncementWhen(log.createdAt)}
+                                            </span>
+                                            {' · '}
+                                            {taskStatusLabel(log.taskStatus)}
+                                            {stats.announcement.quantityTarget != null &&
+                                            stats.announcement.quantityTarget > 0
+                                              ? ` · ${log.quantityDone ?? 0}/${stats.announcement.quantityTarget}`
+                                              : ` · ${log.progress ?? 0}%`}
+                                            {log.note ? ` — ${log.note}` : ''}
+                                          </li>
+                                        ))}
+                                      </ul>
+                                    </details>
+                                  )}
+                              </td>
                               <td className="meta">
                                 {m.respondedAt ? formatAnnouncementWhen(m.respondedAt) : '—'}
                               </td>

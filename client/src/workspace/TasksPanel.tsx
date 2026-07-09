@@ -13,6 +13,7 @@ import { api, apiForm } from '../api';
 import { uiAlert, uiConfirm, uiPrompt } from '../ui/dialogs';
 import type { TaskActivityEntry, TaskBoardSummary, TaskNode, User } from '../types';
 import { TaskBoardCanvas } from './TaskBoardCanvas';
+import { CrossBoardKanbanOverview } from './CrossBoardKanbanOverview';
 import { mergeBoardPwFromStore, rememberTaskBoardUnlock } from './taskBoardUnlockStorage';
 import {
   TASK_TEXT_PREVIEW_MAX_BYTES,
@@ -555,12 +556,18 @@ function TaskRow({
           }
           onChange={(e) => void savePatch({ progress: +e.target.value })}
         />
-        {task.quantityTarget != null && task.quantityTarget > 0 ? (
+        {task.quantityTarget != null &&
+        task.quantityTarget > 0 &&
+        task.quantityDone < task.quantityTarget ? (
           <button
             type="button"
             title="Добавить к числу выполненных единиц"
             onClick={async () => {
               const left = task.quantityTarget! - task.quantityDone;
+              if (left <= 0) {
+                await uiAlert('Счётчик уже заполнен');
+                return;
+              }
               const raw = await uiPrompt(`Сколько единиц отметить сделанными? (осталось ${left})`, {
                 title: 'Отметить выполненное',
                 defaultValue: '1',
@@ -569,6 +576,10 @@ function TaskRow({
               const n = parseInt(String(raw).trim(), 10);
               if (!Number.isFinite(n) || n < 1) {
                 await uiAlert('Введите целое число ≥ 1');
+                return;
+              }
+              if (n > left) {
+                await uiAlert(`Можно добавить не больше ${left}`);
                 return;
               }
               void savePatch({ quantityAdd: n });
@@ -951,6 +962,8 @@ export function TasksPanel({
   const [statusFilter, setStatusFilter] = useState<TaskStatusFilter>('all');
   const [taskTitleSearch, setTaskTitleSearch] = useState('');
   const [savedViews, setSavedViews] = useState<TaskSavedView[]>([]);
+  const [homeTab, setHomeTab] = useState<'kanban' | 'boards'>('kanban');
+  const pendingOverviewTaskIdRef = useRef<number | null>(null);
   const listContextTaskIdRef = useRef<number | null>(null);
 
   const setSelectedBoard = useCallback(
@@ -1125,7 +1138,29 @@ export function TasksPanel({
     setSelectedBoard(b.id);
   }
 
-  // --- Разметка: список досок | канбан + фильтр + дерево; модалки создания/редактирования доски ---
+  const openTaskFromOverview = useCallback(
+    (boardId: number, taskId: number) => {
+      const b = boards.find((x) => x.id === boardId);
+      if (!b) return;
+      if (b.hasPassword) return;
+      pendingOverviewTaskIdRef.current = taskId;
+      setSelectedBoard(boardId);
+    },
+    [boards, setSelectedBoard]
+  );
+
+  useEffect(() => {
+    const tid = pendingOverviewTaskIdRef.current;
+    if (tid == null || selectedBoard == null || tasks.length === 0) return;
+    if (!taskIdInTree(tasks, tid)) {
+      pendingOverviewTaskIdRef.current = null;
+      return;
+    }
+    pendingOverviewTaskIdRef.current = null;
+    flashTaskRowInDom(tid);
+  }, [selectedBoard, tasks]);
+
+  // --- Разметка: обзорный канбан | список досок | канбан доски + дерево ---
 
   return (
     <div className="lc-workspace-panel">
@@ -1142,46 +1177,77 @@ export function TasksPanel({
       {err && <p className="error">{err}</p>}
 
       {selectedBoard == null && (
-        <ul className="lc-doc-list">
-          {boards.map((b) => (
-            <li key={b.id} style={{ display: 'flex', gap: 8, alignItems: 'stretch' }}>
-              <button
-                type="button"
-                className="chat-item"
-                style={{ flex: 1, textAlign: 'left' }}
-                onClick={() => selectBoard(b)}
-              >
-                <span>
-                  {b.name} {b.hasPassword ? '🔒' : ''}
-                </span>
-              </button>
-              {canEditBoard(b) && (
-                <button type="button" onClick={() => setEditBoard(b)}>
-                  Изменить
-                </button>
-              )}
-              {canDeleteBoard(b) && (
-                <button
-                  type="button"
-                  className="danger"
-                  onClick={async () => {
-                    if (!(await uiConfirm(`Удалить доску «${b.name}» и все задачи?`, { title: 'Удаление доски', danger: true, okText: 'Удалить' }))) return;
-                    let pw = effectiveBoardPw[b.id] || '';
-                    if (b.hasPassword && !pw) {
-                      pw = (await uiPrompt('Пароль доски', { title: 'Требуется пароль', localStorageNotice: true })) || '';
-                      if (!pw) return;
-                    }
-                    const q = pw ? `?password=${encodeURIComponent(pw)}` : '';
-                    await api(`/api/task-boards/${b.id}${q}`, { method: 'DELETE' });
-                    loadBoards();
-                  }}
-                >
-                  Удалить
-                </button>
-              )}
-            </li>
-          ))}
-        </ul>
+        <>
+          <div className="lc-group-tabs lc-tasks-home-tabs" role="tablist" aria-label="Раздел задач">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={homeTab === 'kanban'}
+              className={homeTab === 'kanban' ? 'primary' : ''}
+              onClick={() => setHomeTab('kanban')}
+            >
+              Обзор (канбан)
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={homeTab === 'boards'}
+              className={homeTab === 'boards' ? 'primary' : ''}
+              onClick={() => setHomeTab('boards')}
+            >
+              Доски
+            </button>
+          </div>
+          {homeTab === 'kanban' && (
+            <CrossBoardKanbanOverview
+              groupId={groupId}
+              socket={socket}
+              onOpenTask={openTaskFromOverview}
+            />
+          )}
+          {homeTab === 'boards' && (
+            <ul className="lc-doc-list">
+              {boards.map((b) => (
+                <li key={b.id} style={{ display: 'flex', gap: 8, alignItems: 'stretch' }}>
+                  <button
+                    type="button"
+                    className="chat-item"
+                    style={{ flex: 1, textAlign: 'left' }}
+                    onClick={() => selectBoard(b)}
+                  >
+                    <span>
+                      {b.name} {b.hasPassword ? '🔒' : ''}
+                    </span>
+                  </button>
+                  {canEditBoard(b) && (
+                    <button type="button" onClick={() => setEditBoard(b)}>
+                      Изменить
+                    </button>
+                  )}
+                  {canDeleteBoard(b) && (
+                    <button
+                      type="button"
+                      className="danger"
+                      onClick={async () => {
+                        if (!(await uiConfirm(`Удалить доску «${b.name}» и все задачи?`, { title: 'Удаление доски', danger: true, okText: 'Удалить' }))) return;
+                        let pw = effectiveBoardPw[b.id] || '';
+                        if (b.hasPassword && !pw) {
+                          pw = (await uiPrompt('Пароль доски', { title: 'Требуется пароль', localStorageNotice: true })) || '';
+                          if (!pw) return;
+                        }
+                        const q = pw ? `?password=${encodeURIComponent(pw)}` : '';
+                        await api(`/api/task-boards/${b.id}${q}`, { method: 'DELETE' });
+                        loadBoards();
+                      }}
+                    >
+                      Удалить
+                    </button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
       )}
 
       {selectedBoard != null && (

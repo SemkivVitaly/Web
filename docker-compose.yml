@@ -8,6 +8,10 @@
 #   1) В .env укажите LAN_HOST=<IP этого ПК>
 #   2) http://<LAN_HOST>:3780
 #
+# Данные на диске Windows (не Docker volume):
+#   server/data/     — SQLite + collab-office-files (документы) + archives/ (архивы удалённых групп)
+#   server/uploads/  — вложения чата
+#
 # OnlyOffice JWT (опционально, для production):
 #   В onlyoffice.environment задайте JWT_ENABLED: 'true' и JWT_SECRET, совпадающий с ONLYOFFICE_JWT_SECRET на API.
 #   По умолчанию JWT отключён — локальный Docker работает без доп. настройки.
@@ -31,8 +35,8 @@ services:
       ONLYOFFICE_DOCUMENT_SERVER_URL: ${ONLYOFFICE_DOCUMENT_SERVER_URL:-http://${LAN_HOST:-localhost}:${ONLYOFFICE_PORT:-8081}}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localchat:3780}
     volumes:
-      - localchat_data:/app/server/data
-      - localchat_uploads:/app/server/uploads
+      - ./server/data:/app/server/data
+      - ./server/uploads:/app/server/uploads
 
   onlyoffice:
     image: onlyoffice/documentserver:latest
@@ -44,7 +48,3 @@ services:
     environment:
       JWT_ENABLED: 'false'
       ALLOW_PRIVATE_IP_ADDRESS: 'true'
-
-volumes:
-  localchat_data:
-  localchat_uploads:

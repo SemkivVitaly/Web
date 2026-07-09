@@ -901,6 +901,18 @@ a {
 .lc-attach-thumb-wrap {
   display: block;
   max-width: 100%;
+  padding: 0;
+  margin: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.lc-attach-thumb-wrap:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 8px;
 }
 
 .lc-attach-thumb {
@@ -908,6 +920,7 @@ a {
   max-height: 200px;
   border-radius: 8px;
   border: 1px solid var(--border);
+  display: block;
 }
 
 .lc-attach-video {
@@ -2472,7 +2485,9 @@ a {
   border-color: var(--accent-dim);
 }
 
-.lc-chat-doc-img-lightbox {
+/* Специфичность выше, чем у `.modal-backdrop { z-index: 40 }` — иначе lightbox
+   оказывается под модалками уведомлений / назначений (z-index 50). */
+.modal-backdrop.lc-chat-doc-img-lightbox {
   z-index: 2100;
   align-items: center;
   justify-content: center;
@@ -2629,8 +2644,8 @@ a {
   pointer-events: none;
 }
 
-.lc-photo-annotator {
-  z-index: 120;
+.modal-backdrop.lc-photo-annotator {
+  z-index: 2300;
 }
 
 .lc-photo-annotator-inner {
@@ -3184,6 +3199,16 @@ label:has(input[type='radio']) {
 
 .lc-group-mod-members > li {
   margin-bottom: 0.75rem;
+}
+
+.lc-group-creator-pill {
+  margin-left: 0.35rem;
+  font-size: 0.72rem;
+  vertical-align: middle;
+}
+
+.lc-group-delete-zone {
+  margin-top: 0.25rem;
 }
 
 .lc-group-mod-member-line {
@@ -4722,7 +4747,7 @@ video {
   text-decoration: underline;
 }
 
-.lc-task-file-lightbox {
+.modal-backdrop.lc-task-file-lightbox {
   z-index: 2000;
   align-items: center;
   justify-content: center;
@@ -4925,6 +4950,37 @@ video {
   flex: 1;
   min-width: 0;
   word-break: break-word;
+}
+
+.lc-pins-modal-jump {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  text-align: left;
+  padding: 0.15rem 0.35rem;
+  margin: -0.15rem -0.35rem;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  border-radius: 8px;
+}
+
+.lc-pins-modal-jump:hover {
+  background: var(--surface-2, rgba(0, 0, 0, 0.04));
+}
+
+.lc-pins-modal-jump-text {
+  word-break: break-word;
+  line-height: 1.35;
+}
+
+.lc-pins-modal-jump-hint {
+  font-size: 0.78rem;
+  color: var(--accent);
 }
 
 .lc-pins-modal-list .danger {
@@ -5612,7 +5668,7 @@ video {
   }
 }
 
-.lc-canvas-lightbox {
+.modal-backdrop.lc-canvas-lightbox {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -6549,7 +6605,43 @@ a:hover {
 /* =========================================================================
  * Объявления группы с подтверждением ознакомления
  * ========================================================================= */
-.lc-announcement-ack-backdrop {
+.modal-backdrop.lc-announcement-ack-backdrop {
+  z-index: 50;
+}
+
+/* Полноэкранный просмотр документа / OnlyOffice (уведомления, вкладка «Документы»). */
+.lc-doc-fullscreen-overlay,
+.lc-announcement-attachment-oo-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2200;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.lc-doc-fullscreen-overlay > *,
+.lc-announcement-attachment-oo-overlay > * {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+}
+
+.lc-doc-fullscreen-overlay .lc-workspace-panel.lc-office-shell,
+.lc-announcement-attachment-oo-overlay .lc-workspace-panel.lc-office-shell {
+  padding: 0;
+}
+
+.modal-backdrop.lc-announcements-modal-backdrop {
+  z-index: 50;
+}
+
+.modal-backdrop.lc-my-assignments-modal-backdrop {
   z-index: 50;
 }
 
@@ -6861,6 +6953,17 @@ a:hover {
   font-size: 0.9rem;
 }
 
+.lc-my-assignments-status-hint {
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.lc-my-assignments-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
 .lc-my-assignments-history summary {
   cursor: pointer;
   font-size: 0.88rem;
@@ -6871,6 +6974,42 @@ a:hover {
   margin: 0.5rem 0 0;
   padding-left: 1.1rem;
   font-size: 0.85rem;
+}
+
+.lc-announcement-member-history {
+  margin-top: 0.35rem;
+}
+
+.lc-announcement-member-history summary {
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.lc-announcement-member-history ul {
+  margin: 0.35rem 0 0;
+  padding-left: 1rem;
+  font-size: 0.8rem;
+}
+
+.lc-announcements-nav-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.lc-announcements-mod-badge {
+  min-width: 1.1rem;
+  height: 1.1rem;
+  padding: 0 0.3rem;
+  border-radius: 999px;
+  background: #c44;
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1.1rem;
+  text-align: center;
 }
 
 .lc-my-assignments-badge-btn {
@@ -6986,5 +7125,206 @@ a:hover {
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 0.5rem;
+}
+
+/* =========================================================================
+ * Обзорный канбан группы (все доски без пароля)
+ * ========================================================================= */
+.lc-tasks-home-tabs {
+  margin: 0.75rem 0 1rem;
+}
+
+.lc-overview-kanban {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-height: 0;
+}
+
+.lc-overview-kanban-title {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.lc-overview-kanban-hint {
+  margin: 0.15rem 0 0;
+}
+
+.lc-overview-kanban-filters {
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: flex-end;
+  margin-top: 0.5rem;
+}
+
+.lc-overview-kanban-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+}
+
+.lc-overview-kanban-roots {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.4rem !important;
+}
+
+.lc-overview-kanban-columns {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(180px, 1fr));
+  gap: 0.75rem;
+  align-items: start;
+  overflow-x: auto;
+  padding-bottom: 0.5rem;
+}
+
+@media (max-width: 900px) {
+  .lc-overview-kanban-columns {
+    grid-template-columns: repeat(2, minmax(200px, 1fr));
+  }
+}
+
+@media (max-width: 520px) {
+  .lc-overview-kanban-columns {
+    grid-template-columns: 1fr;
+  }
+}
+
+.lc-overview-kanban-col {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-2, rgba(0, 0, 0, 0.03));
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.lc-overview-kanban-col--drag {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.lc-overview-kanban-col-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.55rem 0.65rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.lc-overview-status-pill--todo {
+  background: rgba(120, 120, 128, 0.15);
+  color: var(--muted);
+}
+
+.lc-overview-status-pill--progress {
+  background: rgba(59, 130, 246, 0.15);
+  color: #1d4ed8;
+}
+
+.lc-overview-status-pill--review {
+  background: rgba(210, 153, 34, 0.18);
+  color: #9a6700;
+}
+
+.lc-overview-status-pill--done {
+  background: rgba(46, 160, 67, 0.15);
+  color: #1a7f37;
+}
+
+.lc-overview-kanban-cards {
+  list-style: none;
+  margin: 0;
+  padding: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  max-height: min(60vh, 560px);
+}
+
+.lc-overview-kanban-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.lc-overview-kanban-card--busy {
+  opacity: 0.65;
+}
+
+.lc-overview-kanban-card-main {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.55rem 0.65rem;
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.lc-overview-kanban-card-title {
+  font-size: 0.92rem;
+  font-weight: 600;
+  line-height: 1.3;
+  word-break: break-word;
+}
+
+.lc-overview-kanban-card-board {
+  font-size: 0.78rem;
+}
+
+.lc-overview-kanban-card-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.2rem;
+}
+
+.lc-overview-kanban-progress {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.lc-overview-kanban-assignee {
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 999px;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-2, rgba(0, 0, 0, 0.08));
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.lc-overview-kanban-assignee img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.lc-overview-kanban-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  padding: 0 0.5rem 0.5rem;
+}
+
+.lc-overview-kanban-move {
+  font-size: 0.7rem;
+  padding: 0.15rem 0.4rem;
 }
 

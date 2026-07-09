@@ -262,6 +262,28 @@ function assignmentBadgeCount(db, groupId, userId) {
   return pending + open;
 }
 
+/** Непросмотренные обновления хода работы для модераторов/админов группы. */
+function modUnreadProgressCount(db, groupId, userId) {
+  const m = getMembership(db, groupId, userId);
+  if (!m || isBannedMember(db, groupId, userId)) return 0;
+  if (m.role !== 'admin' && m.role !== 'moderator') return 0;
+  const seen = db
+    .prepare(`SELECT last_seen_at FROM assignment_mod_seen WHERE user_id = ? AND group_id = ?`)
+    .get(userId, groupId);
+  const since = seen?.last_seen_at || '1970-01-01 00:00:00';
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM announcement_progress_log pl
+       JOIN group_announcements ga ON ga.id = pl.announcement_id
+       WHERE ga.group_id = ? AND ${activeAnnouncementClause('ga')}
+       AND ga.kind = 'assignment'
+       AND pl.user_id != ?
+       AND datetime(pl.created_at) > datetime(?)`
+    )
+    .get(groupId, userId, since);
+  return row?.c ?? 0;
+}
+
 /**
  * @param {import('express').Router} r
  * @param {import('socket.io').Server} io
@@ -280,10 +302,25 @@ export function appendAnnouncementRoutes(r, io) {
       )
       .all(uid);
     const groups = {};
+    const modUnread = {};
     for (const { id } of groupRows) {
       groups[id] = assignmentBadgeCount(db, id, uid);
+      const unread = modUnreadProgressCount(db, id, uid);
+      if (unread > 0) modUnread[id] = unread;
     }
-    res.json({ groups });
+    res.json({ groups, modUnread });
+  });
+
+  r.post('/groups/:id/assignments/mod-seen', requireAuth, (req, res) => {
+    const gid = +req.params.id;
+    const chk = requireGroupMember(db, gid, req.userId, 'moderator');
+    if (!chk.ok) return res.status(403).json({ error: chk.error });
+    db.prepare(
+      `INSERT INTO assignment_mod_seen (user_id, group_id, last_seen_at)
+       VALUES (?, ?, datetime('now'))
+       ON CONFLICT(user_id, group_id) DO UPDATE SET last_seen_at = datetime('now')`
+    ).run(req.userId, gid);
+    res.json({ ok: true, unread: 0 });
   });
 
   r.post('/groups/:id/announcements', requireAuth, annUpload, (req, res) => {
@@ -526,48 +563,129 @@ export function appendAnnouncementRoutes(r, io) {
       .get(aid, req.userId);
     if (!ack) return res.status(400).json({ error: 'Сначала подтвердите назначение' });
 
-    const taskStatus = req.body?.taskStatus;
-    if (taskStatus != null && !['todo', 'in_progress', 'done'].includes(taskStatus)) {
+    const body = req.body || {};
+    const hasTaskStatus = Object.prototype.hasOwnProperty.call(body, 'taskStatus');
+    const hasProgress = Object.prototype.hasOwnProperty.call(body, 'progress');
+    const hasQuantityDone = Object.prototype.hasOwnProperty.call(body, 'quantityDone');
+    const hasNote = Object.prototype.hasOwnProperty.call(body, 'note');
+
+    const taskStatusRaw = hasTaskStatus ? body.taskStatus : undefined;
+    if (
+      taskStatusRaw != null &&
+      taskStatusRaw !== '' &&
+      !['todo', 'in_progress', 'done'].includes(taskStatusRaw)
+    ) {
       return res.status(400).json({ error: 'taskStatus: todo, in_progress или done' });
     }
-    let progress =
-      req.body?.progress != null && req.body.progress !== '' ? +req.body.progress : undefined;
-    if (progress != null) progress = Math.min(100, Math.max(0, progress));
-    const quantityDone =
-      req.body?.quantityDone != null && req.body.quantityDone !== ''
-        ? Math.max(0, +req.body.quantityDone)
+
+    let progressIn =
+      hasProgress && body.progress != null && body.progress !== '' ? +body.progress : undefined;
+    if (progressIn != null) {
+      if (Number.isNaN(progressIn)) return res.status(400).json({ error: 'Некорректный progress' });
+      progressIn = Math.min(100, Math.max(0, progressIn));
+    }
+
+    let quantityIn =
+      hasQuantityDone && body.quantityDone != null && body.quantityDone !== ''
+        ? +body.quantityDone
         : undefined;
-    const note = req.body?.note != null ? String(req.body.note).trim() || null : null;
+    if (quantityIn != null) {
+      if (Number.isNaN(quantityIn)) return res.status(400).json({ error: 'Некорректный quantityDone' });
+      quantityIn = Math.max(0, quantityIn);
+      if (ann.quantity_target != null && ann.quantity_target > 0 && quantityIn > ann.quantity_target) {
+        return res.status(400).json({ error: 'Количество не может превышать цель' });
+      }
+    }
+
+    const noteIn = hasNote ? String(body.note ?? '').trim() || null : undefined;
 
     const cur = db
       .prepare(
-        `SELECT task_status, progress, quantity_done FROM announcement_acks WHERE announcement_id = ? AND user_id = ?`
+        `SELECT task_status, progress, quantity_done, progress_note
+         FROM announcement_acks WHERE announcement_id = ? AND user_id = ?`
       )
       .get(aid, req.userId);
 
-    const newTaskStatus = taskStatus ?? cur.task_status ?? 'todo';
-    let newProgress = progress ?? cur.progress ?? 0;
-    const newQty = quantityDone ?? cur.quantity_done ?? 0;
+    const prevStatus = cur.task_status || 'todo';
+    const prevProgress = cur.progress ?? 0;
+    const prevQty = cur.quantity_done ?? 0;
 
-    if (ann.quantity_target != null && ann.quantity_target > 0 && quantityDone != null) {
+    let newQty = quantityIn !== undefined ? quantityIn : prevQty;
+    let newProgress = progressIn !== undefined ? progressIn : prevProgress;
+
+    if (ann.quantity_target != null && ann.quantity_target > 0 && quantityIn !== undefined) {
       newProgress = Math.min(100, Math.floor((100 * newQty) / ann.quantity_target));
     }
-    if (newTaskStatus === 'done') newProgress = 100;
+
+    const qtyChanged = quantityIn !== undefined && quantityIn !== prevQty;
+    const progressChanged = progressIn !== undefined && progressIn !== prevProgress;
+    const workChanged =
+      qtyChanged ||
+      progressChanged ||
+      (ann.quantity_target != null &&
+        ann.quantity_target > 0 &&
+        quantityIn !== undefined &&
+        newProgress !== prevProgress);
+
+    let newTaskStatus = prevStatus;
+    if (taskStatusRaw != null && taskStatusRaw !== '') {
+      newTaskStatus = taskStatusRaw;
+    } else if (workChanged) {
+      const completedByQty =
+        ann.quantity_target != null && ann.quantity_target > 0 && newQty >= ann.quantity_target;
+      const completedByProgress = newProgress >= 100;
+      if (completedByQty || completedByProgress) {
+        newTaskStatus = 'done';
+        newProgress = 100;
+        if (ann.quantity_target != null && ann.quantity_target > 0) {
+          newQty = ann.quantity_target;
+        }
+      } else if (
+        newProgress > 0 ||
+        (ann.quantity_target != null && ann.quantity_target > 0 && newQty > 0)
+      ) {
+        newTaskStatus = 'in_progress';
+      } else {
+        newTaskStatus = 'todo';
+      }
+    }
+
+    if (newTaskStatus === 'done') {
+      newProgress = 100;
+      if (ann.quantity_target != null && ann.quantity_target > 0) {
+        newQty = Math.max(newQty, ann.quantity_target);
+      }
+    }
+
+    const newNote = noteIn !== undefined ? noteIn : cur.progress_note ?? null;
+    const noteOnly =
+      !workChanged &&
+      (taskStatusRaw == null || taskStatusRaw === '' || taskStatusRaw === prevStatus) &&
+      noteIn !== undefined;
+
+    if (!workChanged && !hasTaskStatus && noteIn === undefined) {
+      return res.status(400).json({ error: 'Укажите прогресс, количество или комментарий' });
+    }
+    if (noteOnly && !noteIn) {
+      return res.status(400).json({ error: 'Комментарий пуст' });
+    }
 
     db.prepare(
       `UPDATE announcement_acks SET task_status = ?, progress = ?, quantity_done = ?, progress_note = ?, responded_at = datetime('now')
        WHERE announcement_id = ? AND user_id = ?`
-    ).run(newTaskStatus, newProgress, newQty, note, aid, req.userId);
+    ).run(newTaskStatus, newProgress, newQty, newNote, aid, req.userId);
 
     db.prepare(
       `INSERT INTO announcement_progress_log (announcement_id, user_id, task_status, progress, quantity_done, note)
        VALUES (?,?,?,?,?,?)`
-    ).run(aid, req.userId, newTaskStatus, newProgress, newQty, note);
+    ).run(aid, req.userId, newTaskStatus, newProgress, newQty, noteIn ?? null);
 
     writeAudit(db, req.userId, 'assignment_progress', 'group', ann.group_id, {
       announcementId: aid,
       taskStatus: newTaskStatus,
       progress: newProgress,
+      quantityDone: newQty,
+      noteOnly,
     });
 
     const payload = {
@@ -577,7 +695,8 @@ export function appendAnnouncementRoutes(r, io) {
       taskStatus: newTaskStatus,
       progress: newProgress,
       quantityDone: newQty,
-      note,
+      note: newNote,
+      noteOnly,
     };
     io.to(`group:${ann.group_id}`).emit('announcement:progress', payload);
     res.json(payload);
@@ -624,24 +743,29 @@ export function appendAnnouncementRoutes(r, io) {
 
     const linkedTask = kind === 'linked_task' ? buildLinkedTaskSnapshot(db, ann.linked_task_id) : null;
 
-    const members = rows.map((r) => ({
-      userId: r.user_id,
-      displayName: r.display_name,
-      tag: r.tag,
-      avatarUrl: r.avatar_file ? uploadBasenameApiUrl(r.avatar_file) : null,
-      status:
-        r.status === 'acknowledged'
-          ? 'acknowledged'
-          : r.status === 'need_more'
-            ? 'need_more'
-            : 'pending',
-      comment: r.comment || null,
-      respondedAt: r.responded_at ? sqliteUtcToIso(r.responded_at) ?? r.responded_at : null,
-      taskStatus: r.task_status || null,
-      progress: r.progress ?? null,
-      quantityDone: r.quantity_done ?? null,
-      progressNote: r.progress_note || null,
-    }));
+    const members = rows.map((r) => {
+      const progressLog =
+        kind === 'assignment' ? buildProgressLog(db, aid, r.user_id, 30) : [];
+      return {
+        userId: r.user_id,
+        displayName: r.display_name,
+        tag: r.tag,
+        avatarUrl: r.avatar_file ? uploadBasenameApiUrl(r.avatar_file) : null,
+        status:
+          r.status === 'acknowledged'
+            ? 'acknowledged'
+            : r.status === 'need_more'
+              ? 'need_more'
+              : 'pending',
+        comment: r.comment || null,
+        respondedAt: r.responded_at ? sqliteUtcToIso(r.responded_at) ?? r.responded_at : null,
+        taskStatus: r.task_status || null,
+        progress: r.progress ?? null,
+        quantityDone: r.quantity_done ?? null,
+        progressNote: r.progress_note || null,
+        progressLog,
+      };
+    });
 
     const summary = {
       total: members.length,

@@ -52,6 +52,16 @@ export const COLLAB_DISK_FILE_ACCEPT =
   '.docx,.doc,.xlsx,.xls,.jpg,.jpeg,.png,.gif,.webp,.bmp,.svg,.avif,.tif,.tiff,image/*,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
 /**
+ * `accept` для «Импорт с диска» на канбан-доске: Word/Excel/фото (как в «Документы»)
+ * плюс текстовые форматы для встроенного Yjs-импорта без OnlyOffice.
+ */
+export const TASK_BOARD_DOC_DISK_ACCEPT = [
+  COLLAB_DISK_FILE_ACCEPT,
+  '.txt,.md,.html,.htm,.csv',
+  'text/plain,text/html,text/csv',
+].join(',');
+
+/**
  * Убедиться, что файл подходит для импорта в «Документы»; иначе выбросить `Error` с сообщением для UI.
  */
 export function assertCollabDiskFileSupported(file: File): void {

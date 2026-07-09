@@ -22,6 +22,16 @@ export function officeDiskPath(docId, docType) {
   return path.join(officeDir, `${docId}.${extForDocType(docType)}`);
 }
 
+/** Каталог `data/collab-office-files` (для архивации). */
+export function getOfficeFilesDir() {
+  return officeDir;
+}
+
+/** Расширение файла OnlyOffice по типу документа. */
+export function officeExtForDocType(docType) {
+  return extForDocType(docType);
+}
+
 async function writeEmptyDocx(filePath) {
   const doc = new Document({
     sections: [

@@ -387,6 +387,8 @@ export default function ChatApp({
     fileName: string;
     ooMode: 'view' | 'edit';
     source?: 'message' | 'announcement';
+    /** Поверх модалки уведомления — без переключения на вкладку «Документы». */
+    overlay?: boolean;
   } | null>(null);
   const chatHeaderMenuRef = useRef<HTMLDivElement>(null);
   const [directPeerRead, setDirectPeerRead] = useState<MemberReadCursor | null>(null);
@@ -412,6 +414,7 @@ export default function ChatApp({
   const [announcementAckOpen, setAnnouncementAckOpen] = useState(false);
   const [announcementStatsRefreshKey, setAnnouncementStatsRefreshKey] = useState(0);
   const [assignmentBadges, setAssignmentBadges] = useState<Record<number, number>>({});
+  const [modUnreadProgress, setModUnreadProgress] = useState<Record<number, number>>({});
   const [myAssignmentsOpen, setMyAssignmentsOpen] = useState(false);
   const [myAssignmentsRefreshKey, setMyAssignmentsRefreshKey] = useState(0);
   const [activeAssignmentCount, setActiveAssignmentCount] = useState(0);
@@ -497,27 +500,30 @@ export default function ChatApp({
 
   const openAnnouncementAttachmentOnlyOffice = useCallback(
     (attId: number, fileName: string) => {
-      setModal(null);
-      clearOpenCollabDoc();
-      if (active?.kind === 'group') {
-        setGroupTab('collab');
-        setAttachmentOoViewer({
-          attachmentId: attId,
-          fileName,
-          ooMode: 'view',
-          source: 'announcement',
-        });
-      }
+      if (active?.kind !== 'group') return;
+      setAttachmentOoViewer({
+        attachmentId: attId,
+        fileName,
+        ooMode: 'view',
+        source: 'announcement',
+        overlay: true,
+      });
     },
-    [active?.kind, clearOpenCollabDoc]
+    [active?.kind]
   );
 
   const closeAttachmentOoViewer = useCallback(() => {
-    setAttachmentOoViewer(null);
-    if (active?.kind === 'group') {
-      setGroupTab('chat');
-    }
+    setAttachmentOoViewer((prev) => {
+      if (prev && !prev.overlay && active?.kind === 'group') {
+        setGroupTab('chat');
+      }
+      return null;
+    });
   }, [active?.kind]);
+
+  const closeAnnouncementAttachmentOoOverlay = useCallback(() => {
+    setAttachmentOoViewer((prev) => (prev?.overlay ? null : prev));
+  }, []);
 
   useEffect(() => {
     setAttachmentOoViewer(null);
@@ -525,7 +531,7 @@ export default function ChatApp({
 
   useEffect(() => {
     if (active?.kind === 'group' && groupTab !== 'collab') {
-      setAttachmentOoViewer(null);
+      setAttachmentOoViewer((prev) => (prev?.overlay ? prev : null));
     }
   }, [active?.kind, groupTab]);
 
@@ -564,15 +570,36 @@ export default function ChatApp({
 
   const refreshAssignmentBadges = useCallback(async () => {
     try {
-      const r = await api<{ groups?: unknown }>('/api/chats/assignment-badges');
+      const r = await api<{ groups?: unknown; modUnread?: unknown }>('/api/chats/assignment-badges');
       const gRaw = r?.groups;
       const gObj =
         gRaw && typeof gRaw === 'object' && !Array.isArray(gRaw) ? (gRaw as Record<string, number>) : {};
       setAssignmentBadges(Object.fromEntries(Object.entries(gObj).map(([k, v]) => [Number(k), v])));
+      const mRaw = r?.modUnread;
+      const mObj =
+        mRaw && typeof mRaw === 'object' && !Array.isArray(mRaw) ? (mRaw as Record<string, number>) : {};
+      setModUnreadProgress(Object.fromEntries(Object.entries(mObj).map(([k, v]) => [Number(k), v])));
     } catch {
       /* ignore */
     }
   }, []);
+
+  const markModAssignmentsSeen = useCallback(
+    async (groupId: number) => {
+      try {
+        await api(`/api/groups/${groupId}/assignments/mod-seen`, { method: 'POST', json: {} });
+        setModUnreadProgress((prev) => {
+          if (!prev[groupId]) return prev;
+          const next = { ...prev };
+          delete next[groupId];
+          return next;
+        });
+      } catch {
+        /* ignore */
+      }
+    },
+    []
+  );
 
   const openThreadForMessage = useCallback(
     async (m: Message) => {
@@ -642,6 +669,18 @@ export default function ChatApp({
   const openSingleImageLightbox = useCallback((url: string, alt?: string) => {
     setImageLightbox({ items: [{ url, alt }], index: 0 });
   }, []);
+
+  const openAttachmentGalleryLightbox = useCallback(
+    (items: ChatAttachmentIndexItem[], attachmentId: number) => {
+      const index = items.findIndex((a) => a.id === attachmentId);
+      if (index < 0) return;
+      setImageLightbox({
+        items: items.map((a) => ({ url: resolveUrl(a.url), alt: a.fileName })),
+        index,
+      });
+    },
+    []
+  );
 
   const closePhotoAnnotator = useCallback(() => {
     setPhotoAnnotator((prev) => {
@@ -1924,6 +1963,15 @@ export default function ChatApp({
     });
     s.on('group:kicked', () => {
       showToast('Вас исключили из группы');
+      void refreshLists();
+    });
+    s.on('group:deleted', (p: { groupId: number; name?: string }) => {
+      const name = p.name?.trim() || 'группа';
+      showToast(`Группа «${name}» удалена`);
+      setActive((cur) => (cur?.kind === 'group' && cur.id === p.groupId ? null : cur));
+      setModal((m) => (m === 'groupAdmin' || m === 'groupMod' || m === 'groupAudit' ? null : m));
+      setMyAssignmentsOpen(false);
+      setAttachmentsModalOpen(false);
       void refreshLists();
     });
     s.on('group:unbanned', () => {
@@ -4000,10 +4048,24 @@ export default function ChatApp({
                   {activeGroup && (
                     <button
                       type="button"
+                      className="lc-announcements-nav-btn"
                       style={{ marginLeft: 8 }}
-                      onClick={() => setModal('groupAnnouncements')}
+                      onClick={() => {
+                        setModal('groupAnnouncements');
+                        if (canMod) void markModAssignmentsSeen(active.id);
+                      }}
                     >
                       {canMod ? 'Уведомления' : 'История уведомлений'}
+                      {canMod && (modUnreadProgress[active.id] ?? 0) > 0 && (
+                        <span
+                          className="lc-announcements-mod-badge"
+                          aria-label={`Обновлений хода работы: ${modUnreadProgress[active.id]}`}
+                        >
+                          {(modUnreadProgress[active.id] ?? 0) > 99
+                            ? '99+'
+                            : modUnreadProgress[active.id]}
+                        </span>
+                      )}
                     </button>
                   )}
                   {activeGroup && (
@@ -4282,7 +4344,7 @@ export default function ChatApp({
                               Показать вложения
                             </button>
                           </li>
-                          {active.kind === 'group' && (
+                          {active.kind === 'group' && !activeGroup?.isCreator && (
                             <li>
                               <button
                                 type="button"
@@ -4443,8 +4505,25 @@ export default function ChatApp({
                       </button>
                     )}
                     {activeGroup && (
-                      <button type="button" onClick={() => setModal('groupAnnouncements')}>
+                      <button
+                        type="button"
+                        className="lc-announcements-nav-btn"
+                        onClick={() => {
+                          setModal('groupAnnouncements');
+                          if (canMod) void markModAssignmentsSeen(active.id);
+                        }}
+                      >
                         {canMod ? 'Уведомления' : 'История уведомлений'}
+                        {canMod && (modUnreadProgress[active.id] ?? 0) > 0 && (
+                          <span
+                            className="lc-announcements-mod-badge"
+                            aria-label={`Обновлений хода работы: ${modUnreadProgress[active.id]}`}
+                          >
+                            {(modUnreadProgress[active.id] ?? 0) > 99
+                              ? '99+'
+                              : modUnreadProgress[active.id]}
+                          </span>
+                        )}
                       </button>
                     )}
                     {activeGroup && (
@@ -4500,7 +4579,7 @@ export default function ChatApp({
                     me={me}
                     groupRole={activeGroup?.role || 'member'}
                     openMessageAttachment={
-                      attachmentOoViewer
+                      attachmentOoViewer && !attachmentOoViewer.overlay
                         ? {
                             id: attachmentOoViewer.attachmentId,
                             fileName: attachmentOoViewer.fileName,
@@ -6217,25 +6296,6 @@ export default function ChatApp({
         </div>
       ) : null}
 
-      {imageLightbox && (
-        <ChatImageLightbox
-          items={imageLightbox.items}
-          index={imageLightbox.index}
-          onClose={() => setImageLightbox(null)}
-          onIndexChange={(index) => setImageLightbox((prev) => (prev ? { ...prev, index } : null))}
-          onAnnotate={() => {
-            const item = imageLightbox.items[imageLightbox.index];
-            if (!item) return;
-            setImageLightbox(null);
-            setPhotoAnnotator({
-              src: item.url,
-              fileName: item.alt || 'photo.png',
-              fromLightbox: true,
-            });
-          }}
-        />
-      )}
-
       {photoAnnotator && (
         <PhotoAnnotator
           imageSrc={photoAnnotator.src}
@@ -6516,14 +6576,16 @@ export default function ChatApp({
                   attachmentGalleryItems.map((a) => (
                       <li key={a.id} className="lc-attach-item">
                         {attachmentGalleryTab === 'photos' && (
-                          <a
-                            href={resolveUrl(a.url)}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="lc-attach-thumb-wrap"
+                          <button
+                            type="button"
+                            className="lc-attach-thumb-wrap lc-chat-attach-img--clickable"
+                            aria-label={a.fileName || 'Открыть фото'}
+                            onClick={() =>
+                              openAttachmentGalleryLightbox(attachmentGalleryItems, a.id)
+                            }
                           >
                             <img src={resolveUrl(a.url)} alt="" className="lc-attach-thumb" />
-                          </a>
+                          </button>
                         )}
                         {attachmentGalleryTab === 'video' && (
                           <video src={resolveUrl(a.url)} controls className="lc-attach-video" />
@@ -6650,12 +6712,29 @@ export default function ChatApp({
             <ul className="lc-pins-modal-list">
               {pins.map((p) => (
                 <li key={p.id}>
-                  <div>
-                    <strong>{p.sender.displayName}</strong>: {p.body || 'вложение'}
-                  </div>
+                  <button
+                    type="button"
+                    className="lc-pins-modal-jump"
+                    title="Перейти к сообщению"
+                    onClick={() => {
+                      setModal(null);
+                      if (active.kind === 'group' && groupTab !== 'chat') {
+                        setGroupTab('chat');
+                      }
+                      window.setTimeout(() => scrollToChatMessageOrLoad(p.id), 50);
+                    }}
+                  >
+                    <span className="lc-pins-modal-jump-text">
+                      <strong>{p.sender.displayName}</strong>
+                      {': '}
+                      {p.body?.trim() || 'вложение'}
+                    </span>
+                    <span className="meta lc-pins-modal-jump-hint">Перейти</span>
+                  </button>
                   {canUnpinFromPinsModal() && (
                     <button
                       type="button"
+                      className="danger"
                       onClick={() => {
                         void (async () => {
                           try {
@@ -6677,7 +6756,17 @@ export default function ChatApp({
       )}
 
       {modal === 'groupAdmin' && active?.kind === 'group' && (
-        <GroupAdminModal groupId={active.id} onClose={() => setModal(null)} refresh={refreshLists} />
+        <GroupAdminModal
+          groupId={active.id}
+          onClose={() => setModal(null)}
+          refresh={refreshLists}
+          onDeleted={() => {
+            setModal(null);
+            setActive(null);
+            void refreshLists();
+          }}
+          notify={showToast}
+        />
       )}
 
       {modal === 'groupMod' && active?.kind === 'group' && (
@@ -6686,6 +6775,7 @@ export default function ChatApp({
           members={members}
           me={me}
           role={activeGroup?.role || 'member'}
+          createdById={activeGroup?.createdById}
           invitePolicy={(activeGroup?.invitePolicy as InvitePolicy) || 'all'}
           friendIds={friendIds}
           pendingFriendIn={pendingFriendIn}
@@ -6895,7 +6985,10 @@ export default function ChatApp({
           canViewStats={!!canMod}
           currentUserId={me.id}
           userRole={activeGroup.role}
-          onClose={() => setModal(null)}
+          onClose={() => {
+            setModal(null);
+            if (canMod) void markModAssignmentsSeen(active.id);
+          }}
           onOpenLinkedTask={(taskId) => void openLinkedTaskFromChat(taskId)}
           onOpenImage={openAnnouncementImageLightbox}
           onOpenOnlyOffice={openAnnouncementAttachmentOnlyOffice}
@@ -6913,6 +7006,9 @@ export default function ChatApp({
             setMyAssignmentsOpen(false);
             void openLinkedTaskFromChat(taskId);
           }}
+          onOpenImage={openAnnouncementImageLightbox}
+          onOpenOnlyOffice={openAnnouncementAttachmentOnlyOffice}
+          ooEnabled={!!ooChatEnabled}
           onUpdated={() => {
             setMyAssignmentsRefreshKey((k) => k + 1);
             void refreshAssignmentBadges();
@@ -6972,6 +7068,39 @@ export default function ChatApp({
               .catch(() => setActiveAssignmentCount(0));
           }}
         />
+      )}
+
+      {imageLightbox && (
+        <ChatImageLightbox
+          items={imageLightbox.items}
+          index={imageLightbox.index}
+          onClose={() => setImageLightbox(null)}
+          onIndexChange={(index) => setImageLightbox((prev) => (prev ? { ...prev, index } : null))}
+          onAnnotate={() => {
+            const item = imageLightbox.items[imageLightbox.index];
+            if (!item) return;
+            setImageLightbox(null);
+            setPhotoAnnotator({
+              src: item.url,
+              fileName: item.alt || 'photo.png',
+              fromLightbox: true,
+            });
+          }}
+        />
+      )}
+
+      {attachmentOoViewer?.overlay && attachmentOoViewer.source === 'announcement' && (
+        <div className="lc-doc-fullscreen-overlay" role="presentation">
+          <Suspense fallback={<p className="meta lc-workspace-suspense">Загрузка просмотра…</p>}>
+            <MessageAttachmentOoView
+              attachmentId={attachmentOoViewer.attachmentId}
+              fileName={attachmentOoViewer.fileName}
+              ooMode={attachmentOoViewer.ooMode}
+              attachmentSource="announcement"
+              onBack={closeAnnouncementAttachmentOoOverlay}
+            />
+          </Suspense>
+        </div>
       )}
       </div>
     </div>
@@ -7447,6 +7576,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   group_unban: 'Снятие блокировки',
   group_role: 'Изменение роли',
   group_settings: 'Изменение настроек группы',
+  group_delete: 'Удаление группы',
   audit_log_cleared: 'Очистка журнала аудита',
   chat_clear_all: 'Очистка истории чата у всех',
   chat_clear_own: 'Удаление своих сообщений',
@@ -7845,14 +7975,19 @@ function GroupAdminModal({
   groupId,
   onClose,
   refresh,
+  onDeleted,
+  notify,
 }: {
   groupId: number;
   onClose: () => void;
   refresh: () => void | Promise<void>;
+  onDeleted: () => void;
+  notify: (msg: string) => void;
 }) {
   const [loading, setLoading] = useState(true);
   const [detail, setDetail] = useState<GroupSummary | null>(null);
   const [saveErr, setSaveErr] = useState('');
+  const [deleteBusy, setDeleteBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -7871,6 +8006,26 @@ function GroupAdminModal({
       cancelled = true;
     };
   }, [groupId]);
+
+  async function deleteGroup() {
+    if (!detail?.isCreator || deleteBusy) return;
+    const ok = await uiConfirm(
+      `Удалить группу «${detail.name}» безвозвратно? Будут удалены чат, документы, доски задач и все вложения.`,
+      { title: 'Удаление группы', danger: true, okText: 'Удалить группу' }
+    );
+    if (!ok) return;
+    setDeleteBusy(true);
+    setSaveErr('');
+    try {
+      await api(`/api/groups/${groupId}`, { method: 'DELETE' });
+      notify('Группа удалена');
+      onDeleted();
+    } catch (err) {
+      setSaveErr(err instanceof Error ? err.message : 'Не удалось удалить группу');
+    } finally {
+      setDeleteBusy(false);
+    }
+  }
 
   return (
     <Modal title="Администрирование группы" onClose={onClose}>
@@ -7949,6 +8104,22 @@ function GroupAdminModal({
           <button type="submit" className="primary" style={{ marginTop: 12 }}>
             Сохранить
           </button>
+          {detail.isCreator && (
+            <div className="lc-group-delete-zone">
+              <hr style={{ borderColor: 'var(--border)', margin: '1.25rem 0 1rem' }} />
+              <p className="meta" style={{ marginTop: 0 }}>
+                Только создатель чата может удалить группу. Действие необратимо.
+              </p>
+              <button
+                type="button"
+                className="danger"
+                disabled={deleteBusy}
+                onClick={() => void deleteGroup()}
+              >
+                {deleteBusy ? 'Удаление…' : 'Удалить группу'}
+              </button>
+            </div>
+          )}
         </form>
       )}
     </Modal>
@@ -7960,6 +8131,7 @@ function GroupModModal({
   members,
   me,
   role,
+  createdById,
   invitePolicy,
   friendIds,
   pendingFriendIn,
@@ -7973,6 +8145,7 @@ function GroupModModal({
   members: User[];
   me: User;
   role: string;
+  createdById?: number;
   invitePolicy: InvitePolicy;
   friendIds: Record<number, true>;
   pendingFriendIn: Record<number, true>;
@@ -8008,8 +8181,16 @@ function GroupModModal({
           <li key={u.id}>
             <div className="lc-group-mod-member-line">
               <span className="lc-group-mod-member-name">
-                <strong>{u.displayName}</strong> @{u.tag} ·{' '}
-                {u.id !== me.id && role === 'admin' ? (
+                <strong>{u.displayName}</strong> @{u.tag}
+                {createdById != null && u.id === createdById ? (
+                  <span className="pill lc-group-creator-pill" title="Создатель чата">
+                    создатель
+                  </span>
+                ) : null}{' '}
+                ·{' '}
+                {u.id !== me.id &&
+                role === 'admin' &&
+                !(createdById != null && u.id === createdById) ? (
                   <select
                     className="lc-group-mod-role-select"
                     value={u.role ?? 'member'}
@@ -8082,7 +8263,10 @@ function GroupModModal({
                       В коллеги
                     </button>
                   )}
-                {u.id !== me.id && role !== 'member' && (u.role !== 'admin' || role === 'admin') && (
+                {u.id !== me.id &&
+                  role !== 'member' &&
+                  !(createdById != null && u.id === createdById) &&
+                  (u.role !== 'admin' || role === 'admin') && (
                   <>
                   <button
                     type="button"
