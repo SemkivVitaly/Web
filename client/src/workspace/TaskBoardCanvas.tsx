@@ -23,6 +23,10 @@ import type { CollabDocPickerRow, TaskCanvasItem, TaskNode, User } from '../type
 import { AddItemMenu, CanvasSolutionExplorer } from './SolutionExplorer';
 import { readTaskBoardDragItemId, setTaskBoardDragItemData } from './canvasDragMime';
 import { inferCollabDocTypeFromFile, isCollabDiskImageFile } from './collabDiskFileMeta';
+
+function canvasFileUrl(url: string | null | undefined): string {
+  return url ? resolveUrl(url) : '';
+}
 import { CanvasCardPreview } from './canvasItemPreview';
 import { yjsUpdateToBase64 } from './yjsB64';
 
@@ -114,8 +118,8 @@ function MiniCanvasItem({
         onClick={() => {
           if (item.kind === 'task' && item.taskId) onOpenTask(item.taskId);
           else if (item.kind === 'collab_doc' && item.collabDocumentId) onOpenCollab(item.collabDocumentId);
-          else if (item.kind === 'upload' && item.isImage && item.fileUrl) onOpenImage(item.fileUrl);
-          else if (item.kind === 'upload' && item.fileUrl) window.open(item.fileUrl, '_blank', 'noopener,noreferrer');
+          else if (item.kind === 'upload' && item.isImage && item.fileUrl) onOpenImage(canvasFileUrl(item.fileUrl));
+          else if (item.kind === 'upload' && item.fileUrl) window.open(canvasFileUrl(item.fileUrl), '_blank', 'noopener,noreferrer');
           else if (item.kind === 'link' && item.linkUrl) window.open(item.linkUrl, '_blank', 'noopener,noreferrer');
         }}
       >
@@ -332,8 +336,8 @@ function CanvasRootCard({
           onClick={() => {
             if (item.kind === 'task' && item.taskId) onOpenTask(item.taskId);
             else if (item.kind === 'collab_doc' && item.collabDocumentId) onOpenCollab(item.collabDocumentId);
-            else if (item.kind === 'upload' && item.isImage && item.fileUrl) onOpenImage(item.fileUrl);
-            else if (item.kind === 'upload' && item.fileUrl) window.open(item.fileUrl, '_blank', 'noopener,noreferrer');
+            else if (item.kind === 'upload' && item.isImage && item.fileUrl) onOpenImage(canvasFileUrl(item.fileUrl));
+            else if (item.kind === 'upload' && item.fileUrl) window.open(canvasFileUrl(item.fileUrl), '_blank', 'noopener,noreferrer');
             else if (item.kind === 'link' && item.linkUrl) window.open(item.linkUrl, '_blank', 'noopener,noreferrer');
           }}
         >
@@ -361,8 +365,8 @@ function CanvasRootCard({
       </div>
       <div className="meta lc-canvas-card-meta">{item.previewLine}</div>
       {item.kind === 'upload' && item.isImage && item.fileUrl && (
-        <button type="button" className="lc-canvas-card-thumb-btn" onClick={() => onOpenImage(item.fileUrl!)}>
-          <img src={item.fileUrl} alt="" className="lc-canvas-card-thumb" />
+        <button type="button" className="lc-canvas-card-thumb-btn" onClick={() => onOpenImage(canvasFileUrl(item.fileUrl!))}>
+          <img src={canvasFileUrl(item.fileUrl)} alt="" className="lc-canvas-card-thumb" />
         </button>
       )}
       {hover && (
@@ -1174,8 +1178,8 @@ export function TaskBoardCanvas({
     (item: TaskCanvasItem) => {
       if (item.kind === 'task' && item.taskId) onFocusTaskInList(item.taskId);
       else if (item.kind === 'collab_doc' && item.collabDocumentId) onOpenCollabDocument(item.collabDocumentId);
-      else if (item.kind === 'upload' && item.isImage && item.fileUrl) setLightbox(item.fileUrl);
-      else if (item.kind === 'upload' && item.fileUrl) window.open(item.fileUrl, '_blank', 'noopener,noreferrer');
+      else if (item.kind === 'upload' && item.isImage && item.fileUrl) setLightbox(canvasFileUrl(item.fileUrl));
+      else if (item.kind === 'upload' && item.fileUrl) window.open(canvasFileUrl(item.fileUrl), '_blank', 'noopener,noreferrer');
       else if (item.kind === 'link' && item.linkUrl) window.open(item.linkUrl, '_blank', 'noopener,noreferrer');
     },
     [onFocusTaskInList, onOpenCollabDocument]

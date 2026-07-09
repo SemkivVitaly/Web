@@ -132,7 +132,12 @@ export function GroupWorkspace({
   me: User;
   groupRole: string;
   /** Просмотр вложения из чата (та же оболочка, что у открытого документа) */
-  openMessageAttachment?: { id: number; fileName: string; ooMode?: 'view' | 'edit' } | null;
+  openMessageAttachment?: {
+    id: number;
+    fileName: string;
+    ooMode?: 'view' | 'edit';
+    source?: 'message' | 'announcement';
+  } | null;
   onCloseMessageAttachment?: () => void;
   /** Открыть документ с другой вкладки (например с доски задач) */
   openDocumentId?: number | null;
@@ -574,6 +579,7 @@ export function GroupWorkspace({
           attachmentId={openMessageAttachment.id}
           fileName={openMessageAttachment.fileName}
           ooMode={openMessageAttachment.ooMode ?? 'view'}
+          attachmentSource={openMessageAttachment.source ?? 'message'}
           onBack={() => onCloseMessageAttachment?.()}
         />
       </Suspense>

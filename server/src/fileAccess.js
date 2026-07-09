@@ -110,12 +110,13 @@ export function resolveBasenameFileAccess(db, basename, userId) {
 
   const ann = db
     .prepare(
-      `SELECT aa.mime_type, a.group_id FROM announcement_attachments aa
-       JOIN announcements a ON a.id = aa.announcement_id
+      `SELECT aa.mime_type, ga.group_id, ga.deleted_at FROM announcement_attachments aa
+       JOIN group_announcements ga ON ga.id = aa.announcement_id
        WHERE aa.stored_name = ? LIMIT 1`
     )
     .get(base);
   if (ann) {
+    if (ann.deleted_at) return { ok: false, status: 404, error: 'not found' };
     if (!canAccessGroup(db, ann.group_id, userId)) return { ok: false, status: 403, error: 'forbidden' };
     return serveBasenameIfExists(base, ann.mime_type);
   }

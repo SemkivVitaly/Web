@@ -5,8 +5,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, apiForm, resolveUrl } from '../api';
 import { uiConfirm } from '../ui/dialogs';
-import type { User } from '../types';
+import type { Attachment, User } from '../types';
 import { formatMessageClock } from './foundation';
+import { MessageImageGrid } from './MessageImageGrid';
+import { chatAttachmentSupportsOnlyOffice } from './onlyOfficeAttachment';
 
 export type AnnouncementKind = 'notice' | 'assignment' | 'linked_task';
 export type AnnouncementAudience = 'all' | 'selected';
@@ -125,31 +127,73 @@ function taskStatusLabel(s: string | null | undefined): string {
   return '—';
 }
 
-export function AnnouncementAttachmentList({ attachments }: { attachments: AnnouncementAttachment[] }) {
+export function AnnouncementAttachmentList({
+  attachments,
+  onOpenImage,
+  onOpenOnlyOffice,
+  ooEnabled,
+}: {
+  attachments: AnnouncementAttachment[];
+  onOpenImage?: (attachments: AnnouncementAttachment[], attachmentId: number) => void;
+  onOpenOnlyOffice?: (attachmentId: number, fileName: string) => void;
+  ooEnabled?: boolean;
+}) {
   if (!attachments.length) return null;
+  const images = attachments.filter((a) => a.kind === 'image');
+  const others = attachments.filter((a) => a.kind !== 'image');
+  const asAttachments = attachments as unknown as Attachment[];
+
   return (
     <div className="lc-announcement-attachments">
-      {attachments.map((a) => (
+      {images.length > 0 && onOpenImage ? (
+        <MessageImageGrid
+          images={images as unknown as Attachment[]}
+          allAttachments={asAttachments}
+          resolveUrl={resolveUrl}
+          onOpenImage={(_all, id) => onOpenImage(attachments, id)}
+        />
+      ) : (
+        images.map((a) => (
+          <img key={a.id} className="attach" src={resolveUrl(a.url)} alt={a.fileName} />
+        ))
+      )}
+      {others.map((a) => (
         <div key={a.id} className="lc-announcement-attachment">
-          {a.kind === 'image' && (
-            <img className="attach" src={resolveUrl(a.url)} alt={a.fileName} />
-          )}
           {a.kind === 'video' && <video src={resolveUrl(a.url)} controls />}
           {(a.kind === 'audio' || a.kind === 'voice') && (
             <audio src={resolveUrl(a.url)} controls />
           )}
-          {a.kind === 'file' && (
-            <a className="lc-chat-attach-link" href={resolveUrl(a.url)} download={a.fileName}>
-              📎 {a.fileName}
-            </a>
-          )}
+          {a.kind === 'file' &&
+            (ooEnabled && onOpenOnlyOffice && chatAttachmentSupportsOnlyOffice(a.fileName, a.mimeType) ? (
+              <button
+                type="button"
+                className="lc-chat-attach-link"
+                onClick={() => onOpenOnlyOffice(a.id, a.fileName)}
+              >
+                📎 {a.fileName}
+              </button>
+            ) : (
+              <a className="lc-chat-attach-link" href={resolveUrl(a.url)} download={a.fileName}>
+                📎 {a.fileName}
+              </a>
+            ))}
         </div>
       ))}
     </div>
   );
 }
 
-export function AnnouncementCardBody({ item }: { item: GroupAnnouncement }) {
+export function AnnouncementCardBody({
+  item,
+  onOpenImage,
+  onOpenOnlyOffice,
+  ooEnabled,
+}: {
+  item: GroupAnnouncement;
+  onOpenImage?: (attachments: AnnouncementAttachment[], attachmentId: number) => void;
+  onOpenOnlyOffice?: (attachmentId: number, fileName: string) => void;
+  ooEnabled?: boolean;
+}) {
   return (
     <article className="lc-announcement-card">
       <div className="lc-announcement-card-meta">
@@ -169,7 +213,12 @@ export function AnnouncementCardBody({ item }: { item: GroupAnnouncement }) {
         </p>
       )}
       {item.body && <div className="lc-announcement-card-body">{item.body}</div>}
-      <AnnouncementAttachmentList attachments={item.attachments} />
+      <AnnouncementAttachmentList
+        attachments={item.attachments}
+        onOpenImage={onOpenImage}
+        onOpenOnlyOffice={onOpenOnlyOffice}
+        ooEnabled={ooEnabled}
+      />
     </article>
   );
 }
@@ -185,10 +234,16 @@ export function AnnouncementAckModal({
   announcements,
   onResponded,
   onOpenLinkedTask,
+  onOpenImage,
+  onOpenOnlyOffice,
+  ooEnabled,
 }: {
   announcements: GroupAnnouncement[];
   onResponded: (announcementId: number) => void;
   onOpenLinkedTask?: (taskId: number, boardId: number) => void;
+  onOpenImage?: (attachments: AnnouncementAttachment[], attachmentId: number) => void;
+  onOpenOnlyOffice?: (attachmentId: number, fileName: string) => void;
+  ooEnabled?: boolean;
 }) {
   const current = announcements[0] ?? null;
   const [needMoreMode, setNeedMoreMode] = useState(false);
@@ -247,7 +302,12 @@ export function AnnouncementAckModal({
             Осталось ответить: {announcements.length}
           </p>
         )}
-        <AnnouncementCardBody item={current} />
+        <AnnouncementCardBody
+          item={current}
+          onOpenImage={onOpenImage}
+          onOpenOnlyOffice={onOpenOnlyOffice}
+          ooEnabled={ooEnabled}
+        />
         {needMoreMode ? (
           <div className="lc-announcement-comment-box">
             <label htmlFor="lc-announcement-comment">Что нужно уточнить?</label>
@@ -311,14 +371,28 @@ export function GroupAnnouncementsModal({
   groupId,
   members: membersProp,
   statsRefreshKey,
+  canCreate,
+  canViewStats,
+  currentUserId,
+  userRole,
   onClose,
   onOpenLinkedTask,
+  onOpenImage,
+  onOpenOnlyOffice,
+  ooEnabled,
 }: {
   groupId: number;
   members?: User[];
   statsRefreshKey: number;
+  canCreate: boolean;
+  canViewStats: boolean;
+  currentUserId: number;
+  userRole: string;
   onClose: () => void;
   onOpenLinkedTask?: (taskId: number, boardId: number) => void;
+  onOpenImage?: (attachments: AnnouncementAttachment[], attachmentId: number) => void;
+  onOpenOnlyOffice?: (attachmentId: number, fileName: string) => void;
+  ooEnabled?: boolean;
 }) {
   const [announcements, setAnnouncements] = useState<GroupAnnouncement[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -396,10 +470,10 @@ export function GroupAnnouncementsModal({
 
   useEffect(() => {
     void loadList();
-  }, [loadList]);
+  }, [loadList, statsRefreshKey]);
 
   useEffect(() => {
-    if (selectedId == null) {
+    if (!canViewStats || selectedId == null) {
       setStats(null);
       return;
     }
@@ -421,7 +495,27 @@ export function GroupAnnouncementsModal({
     return () => {
       cancelled = true;
     };
-  }, [selectedId, statsRefreshKey]);
+  }, [selectedId, statsRefreshKey, canViewStats]);
+
+  function addFilesFromInput(fileList: FileList | null) {
+    if (!fileList?.length) return;
+    const incoming = Array.from(fileList);
+    setFiles((prev) => {
+      const merged = [...prev];
+      for (const f of incoming) {
+        const dup = merged.some(
+          (x) => x.name === f.name && x.size === f.size && x.lastModified === f.lastModified
+        );
+        if (!dup) merged.push(f);
+      }
+      return merged;
+    });
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+
+  function removePendingFile(index: number) {
+    setFiles((prev) => prev.filter((_, i) => i !== index));
+  }
 
   function toggleRecipient(userId: number) {
     setSelectedRecipientIds((prev) =>
@@ -506,6 +600,8 @@ export function GroupAnnouncementsModal({
 
   const selected = announcements.find((a) => a.id === selectedId) ?? null;
   const showTaskStats = stats?.announcement.kind === 'assignment' || stats?.announcement.kind === 'linked_task';
+  const canDeleteSelected =
+    selected != null && (userRole === 'admin' || selected.author.id === currentUserId);
 
   return (
     <div
@@ -521,7 +617,8 @@ export function GroupAnnouncementsModal({
         onMouseDown={(e) => e.stopPropagation()}
         onClick={(e) => e.stopPropagation()}
       >
-        <h3>Уведомления и назначения</h3>
+        <h3>{canCreate ? 'Уведомления и назначения' : 'История уведомлений'}</h3>
+        {canCreate && (
         <form className="lc-announcement-create" onSubmit={(e) => void createAnnouncement(e)}>
           <div className="lc-announcement-form-row">
             <label>
@@ -655,14 +752,26 @@ export function GroupAnnouncementsModal({
               type="file"
               multiple
               disabled={createBusy}
-              onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
+              onChange={(e) => addFilesFromInput(e.target.files)}
             />
             <button type="submit" className="primary" disabled={createBusy}>
               {createBusy ? 'Публикация…' : 'Опубликовать'}
             </button>
           </div>
-          {files.length > 0 && <p className="meta">Вложений: {files.length}</p>}
+          {files.length > 0 && (
+            <ul className="lc-announcement-pending-files" style={{ listStyle: 'none', padding: 0, margin: '0.5rem 0' }}>
+              {files.map((f, i) => (
+                <li key={`${f.name}-${f.size}-${f.lastModified}`} className="row-actions" style={{ gap: '0.5rem' }}>
+                  <span className="meta">{f.name}</span>
+                  <button type="button" disabled={createBusy} onClick={() => removePendingFile(i)}>
+                    Убрать
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </form>
+        )}
         {err && <p className="error">{err}</p>}
         {loading ? (
           <p className="meta">Загрузка…</p>
@@ -689,8 +798,14 @@ export function GroupAnnouncementsModal({
             </ul>
             {selected && (
               <div className="lc-announcements-detail">
-                <AnnouncementCardBody item={selected} />
+                <AnnouncementCardBody
+                  item={selected}
+                  onOpenImage={onOpenImage}
+                  onOpenOnlyOffice={onOpenOnlyOffice}
+                  ooEnabled={ooEnabled}
+                />
                 <div className="row-actions">
+                  {canDeleteSelected && (
                   <button
                     type="button"
                     className="danger"
@@ -699,6 +814,7 @@ export function GroupAnnouncementsModal({
                   >
                     {deleteBusy === selected.id ? 'Удаление…' : 'Удалить'}
                   </button>
+                  )}
                   {selected.kind === 'linked_task' && selected.linkedTask && onOpenLinkedTask && (
                     <button
                       type="button"
@@ -710,9 +826,9 @@ export function GroupAnnouncementsModal({
                     </button>
                   )}
                 </div>
-                {statsLoading ? (
+                {canViewStats && statsLoading ? (
                   <p className="meta">Загрузка статистики…</p>
-                ) : stats ? (
+                ) : canViewStats && stats ? (
                   <>
                     {stats.linkedTask && (
                       <div className="lc-announcement-linked-stats meta">

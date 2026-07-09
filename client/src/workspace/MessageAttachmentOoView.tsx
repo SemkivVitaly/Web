@@ -18,12 +18,14 @@ export function MessageAttachmentOoView({
   attachmentId,
   fileName,
   ooMode = 'view',
+  attachmentSource = 'message',
   onBack,
 }: {
   attachmentId: number;
   fileName: string;
   /** `edit` — только если текущий пользователь автор сообщения (проверяется на сервере). */
   ooMode?: 'view' | 'edit';
+  attachmentSource?: 'message' | 'announcement';
   onBack: () => void;
 }) {
   const [session, setSession] = useState<OoConfigResp | null>(null);
@@ -37,9 +39,13 @@ export function MessageAttachmentOoView({
     setSession(null);
     void (async () => {
       try {
-        const r = await api<OoConfigResp>(`/api/message-attachments/${attachmentId}/onlyoffice/config`, {
+        const configPath =
+          attachmentSource === 'announcement'
+            ? `/api/announcement-attachments/${attachmentId}/onlyoffice/config`
+            : `/api/message-attachments/${attachmentId}/onlyoffice/config`;
+        const r = await api<OoConfigResp>(configPath, {
           method: 'POST',
-          json: { mode: ooMode },
+          json: attachmentSource === 'announcement' ? {} : { mode: ooMode },
         });
         if (!alive) return;
         setSession(r);
@@ -53,7 +59,7 @@ export function MessageAttachmentOoView({
     return () => {
       alive = false;
     };
-  }, [attachmentId, ooMode]);
+  }, [attachmentId, ooMode, attachmentSource]);
 
   const sk = shellKindFromFileName(fileName);
 
@@ -67,7 +73,8 @@ export function MessageAttachmentOoView({
           <div className="lc-mso-titlebar-doc">
             <span className="lc-mso-titlebar-name">{fileName}</span>
             <span className="lc-mso-titlebar-sub">
-              OnlyOffice · вложение из чата ({ooMode === 'edit' ? 'редактирование' : 'просмотр'})
+              OnlyOffice · {attachmentSource === 'announcement' ? 'вложение объявления' : 'вложение из чата'} (
+              {ooMode === 'edit' ? 'редактирование' : 'просмотр'})
             </span>
           </div>
         </div>

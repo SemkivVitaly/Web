@@ -5,6 +5,7 @@
 
 import { useEffect, useState } from 'react';
 import type { TaskCanvasItem } from '../types';
+import { resolveUrl } from '../api';
 import {
   HOVER_TEXT_DISPLAY_MAX_CHARS,
   HOVER_TEXT_FETCH_MAX_BYTES,
@@ -81,7 +82,7 @@ export function CanvasCardPreview({ item }: { item: TaskCanvasItem }) {
     if (item.isImage) {
       return (
         <div className="lc-canvas-hover-body lc-canvas-hover-imgwrap">
-          <img src={item.fileUrl} alt="" className="lc-canvas-hover-img" />
+          <img src={resolveUrl(item.fileUrl)} alt="" className="lc-canvas-hover-img" />
         </div>
       );
     }
@@ -90,7 +91,7 @@ export function CanvasCardPreview({ item }: { item: TaskCanvasItem }) {
         <div className="lc-canvas-hover-body">
           <div className="meta">{item.fileMime || 'Текст'}</div>
           {item.fileName ? <div className="lc-canvas-hover-filename">{item.fileName}</div> : null}
-          <CanvasUploadTextSnippet url={item.fileUrl} fileName={item.fileName} />
+          <CanvasUploadTextSnippet url={resolveUrl(item.fileUrl)} fileName={item.fileName} />
         </div>
       );
     }

@@ -49,6 +49,7 @@ import {
   AnnouncementAckModal,
   GroupAnnouncementsModal,
   type GroupAnnouncement,
+  type AnnouncementAttachment,
 } from './chat/AnnouncementModals';
 import { MyAssignmentsBadgeButton, MyAssignmentsPanel } from './chat/MyAssignmentsPanel';
 import {
@@ -385,6 +386,7 @@ export default function ChatApp({
     attachmentId: number;
     fileName: string;
     ooMode: 'view' | 'edit';
+    source?: 'message' | 'announcement';
   } | null>(null);
   const chatHeaderMenuRef = useRef<HTMLDivElement>(null);
   const [directPeerRead, setDirectPeerRead] = useState<MemberReadCursor | null>(null);
@@ -398,6 +400,7 @@ export default function ChatApp({
   const [globalSearchResults, setGlobalSearchResults] = useState<
     { message: Message; chatKind: 'group' | 'direct'; chatId: number; chatLabel: string }[]
   >([]);
+  const [directSearchQ, setDirectSearchQ] = useState('');
   const [pendingScrollMessageId, setPendingScrollMessageId] = useState<number | null>(null);
   const [threadPanel, setThreadPanel] = useState<{ rootId: number; messages: Message[] } | null>(null);
   const [threadLoading, setThreadLoading] = useState(false);
@@ -482,14 +485,31 @@ export default function ChatApp({
       const ooMode: 'view' | 'edit' = +messageSenderId === +me.id ? 'edit' : 'view';
       if (active?.kind === 'group') {
         setGroupTab('collab');
-        setAttachmentOoViewer({ attachmentId: attId, fileName, ooMode });
+        setAttachmentOoViewer({ attachmentId: attId, fileName, ooMode, source: 'message' });
         return;
       }
       if (active?.kind === 'direct') {
-        setAttachmentOoViewer({ attachmentId: attId, fileName, ooMode });
+        setAttachmentOoViewer({ attachmentId: attId, fileName, ooMode, source: 'message' });
       }
     },
     [active?.kind, clearOpenCollabDoc, me.id]
+  );
+
+  const openAnnouncementAttachmentOnlyOffice = useCallback(
+    (attId: number, fileName: string) => {
+      setModal(null);
+      clearOpenCollabDoc();
+      if (active?.kind === 'group') {
+        setGroupTab('collab');
+        setAttachmentOoViewer({
+          attachmentId: attId,
+          fileName,
+          ooMode: 'view',
+          source: 'announcement',
+        });
+      }
+    },
+    [active?.kind, clearOpenCollabDoc]
   );
 
   const closeAttachmentOoViewer = useCallback(() => {
@@ -605,6 +625,19 @@ export default function ChatApp({
       index,
     });
   }, []);
+
+  const openAnnouncementImageLightbox = useCallback(
+    (attachments: AnnouncementAttachment[], attachmentId: number) => {
+      const imgs = attachments.filter((a) => a.kind === 'image');
+      const index = imgs.findIndex((a) => a.id === attachmentId);
+      if (index < 0) return;
+      setImageLightbox({
+        items: imgs.map((a) => ({ url: resolveUrl(a.url), alt: a.fileName })),
+        index,
+      });
+    },
+    []
+  );
 
   const openSingleImageLightbox = useCallback((url: string, alt?: string) => {
     setImageLightbox({ items: [{ url, alt }], index: 0 });
@@ -2197,13 +2230,30 @@ export default function ChatApp({
       setMyAssignmentsRefreshKey((k) => k + 1);
       void refreshAssignmentBadges();
     };
+    const onAnnouncementDeleted = (p: { announcementId: number; groupId: number }) => {
+      const cur = activeRef.current;
+      if (cur?.kind !== 'group' || cur.id !== p.groupId) return;
+      setPendingAnnouncements((prev) => {
+        const next = prev.filter((a) => a.id !== p.announcementId);
+        if (next.length === 0) setAnnouncementAckOpen(false);
+        return next;
+      });
+      setAnnouncementStatsRefreshKey((k) => k + 1);
+      setMyAssignmentsRefreshKey((k) => k + 1);
+      void refreshAssignmentBadges();
+      void api<GroupAnnouncement[]>(`/api/groups/${p.groupId}/announcements/my-assignments`)
+        .then((rows) => setActiveAssignmentCount(Array.isArray(rows) ? rows.length : 0))
+        .catch(() => setActiveAssignmentCount(0));
+    };
     s.on('announcement:new', onAnnouncementNew);
     s.on('announcement:responded', onAnnouncementResponded);
     s.on('announcement:progress', onAnnouncementProgress);
+    s.on('announcement:deleted', onAnnouncementDeleted);
     return () => {
       s.off('announcement:new', onAnnouncementNew);
       s.off('announcement:responded', onAnnouncementResponded);
       s.off('announcement:progress', onAnnouncementProgress);
+      s.off('announcement:deleted', onAnnouncementDeleted);
     };
   }, [ioSocket, me.id, refreshAssignmentBadges]);
 
@@ -2373,6 +2423,14 @@ export default function ChatApp({
     () => [...directs].sort((a, b) => rankFor('direct', b.id) - rankFor('direct', a.id)),
     [directs, rankFor]
   );
+  const filteredDirects = useMemo(() => {
+    const q = directSearchQ.trim().replace(/^@+/, '').toLowerCase();
+    if (!q) return sortedDirects;
+    return sortedDirects.filter(
+      (d) =>
+        d.peer.displayName.toLowerCase().includes(q) || d.peer.tag.toLowerCase().includes(q)
+    );
+  }, [sortedDirects, directSearchQ]);
 
   function unreadForGroup(id: number) {
     if (isChatMutedPrefs(prefs, 'group', id)) return 0;
@@ -3605,12 +3663,24 @@ export default function ChatApp({
               aria-labelledby="tab-sidebar-directs"
               className="lc-chat-tab-panel"
             >
+              <label className="lc-chat-sidebar-search" style={{ display: 'block', marginBottom: 8 }}>
+                <span className="sr-only">Поиск личных чатов</span>
+                <input
+                  type="search"
+                  value={directSearchQ}
+                  onChange={(e) => setDirectSearchQ(e.target.value)}
+                  placeholder="Имя или @тег…"
+                  aria-label="Поиск личных чатов по имени или тегу"
+                />
+              </label>
               {sortedDirects.length === 0 ? (
                 <p className="lc-chat-section-empty">
                   Нет переписок — откройте профиль коллеги из списка «Коллеги».
                 </p>
+              ) : filteredDirects.length === 0 ? (
+                <p className="lc-chat-section-empty">Ничего не найдено.</p>
               ) : (
-                sortedDirects.map((d) => (
+                filteredDirects.map((d) => (
                   <div key={`d-${d.id}`} style={{ display: 'flex', gap: 4, minWidth: 0 }}>
                     <button
                       type="button"
@@ -3927,13 +3997,13 @@ export default function ChatApp({
                       Пригласить
                     </button>
                   )}
-                  {canMod && (
+                  {activeGroup && (
                     <button
                       type="button"
                       style={{ marginLeft: 8 }}
                       onClick={() => setModal('groupAnnouncements')}
                     >
-                      Уведомления
+                      {canMod ? 'Уведомления' : 'История уведомлений'}
                     </button>
                   )}
                   {activeGroup && (
@@ -4372,9 +4442,9 @@ export default function ChatApp({
                         Пригласить
                       </button>
                     )}
-                    {canMod && (
+                    {activeGroup && (
                       <button type="button" onClick={() => setModal('groupAnnouncements')}>
-                        Уведомления
+                        {canMod ? 'Уведомления' : 'История уведомлений'}
                       </button>
                     )}
                     {activeGroup && (
@@ -4435,6 +4505,7 @@ export default function ChatApp({
                             id: attachmentOoViewer.attachmentId,
                             fileName: attachmentOoViewer.fileName,
                             ooMode: attachmentOoViewer.ooMode,
+                            source: attachmentOoViewer.source ?? 'message',
                           }
                         : null
                     }
@@ -4494,6 +4565,7 @@ export default function ChatApp({
                     attachmentId={attachmentOoViewer.attachmentId}
                     fileName={attachmentOoViewer.fileName}
                     ooMode={attachmentOoViewer.ooMode}
+                    attachmentSource={attachmentOoViewer.source ?? 'message'}
                     onBack={closeAttachmentOoViewer}
                   />
                 </Suspense>
@@ -6814,13 +6886,20 @@ export default function ChatApp({
         <GroupAuditModal groupId={active.id} onClose={() => setModal(null)} />
       )}
 
-      {modal === 'groupAnnouncements' && active?.kind === 'group' && canMod && (
+      {modal === 'groupAnnouncements' && active?.kind === 'group' && activeGroup && (
         <GroupAnnouncementsModal
           groupId={active.id}
           members={members}
           statsRefreshKey={announcementStatsRefreshKey}
+          canCreate={!!canMod}
+          canViewStats={!!canMod}
+          currentUserId={me.id}
+          userRole={activeGroup.role}
           onClose={() => setModal(null)}
           onOpenLinkedTask={(taskId) => void openLinkedTaskFromChat(taskId)}
+          onOpenImage={openAnnouncementImageLightbox}
+          onOpenOnlyOffice={openAnnouncementAttachmentOnlyOffice}
+          ooEnabled={!!ooChatEnabled}
         />
       )}
 
@@ -6877,6 +6956,9 @@ export default function ChatApp({
         <AnnouncementAckModal
           announcements={pendingAnnouncements}
           onOpenLinkedTask={(taskId) => void openLinkedTaskFromChat(taskId)}
+          onOpenImage={openAnnouncementImageLightbox}
+          onOpenOnlyOffice={openAnnouncementAttachmentOnlyOffice}
+          ooEnabled={!!ooChatEnabled}
           onResponded={(id) => {
             setPendingAnnouncements((prev) => {
               const next = prev.filter((a) => a.id !== id);

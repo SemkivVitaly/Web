@@ -20,6 +20,8 @@ import {
   verifyOoImportToken,
   signOoChatAttachmentToken,
   verifyOoChatAttachmentToken,
+  signOoAnnouncementAttachmentToken,
+  verifyOoAnnouncementAttachmentToken,
 } from './auth.js';
 import { ensureOfficeDiskFile, readOfficeFileBuffer, writeOfficeFileBuffer } from './officeFileStore.js';
 import { upload, decodeMultipartFilename, normalizePossibleMultipartFilename, uploadsDir } from './upload.js';
@@ -280,6 +282,18 @@ function getMessageAttachmentAccess(db, attachmentId, userId) {
       return { ok: false, error: 'Нет доступа' };
   } else return { ok: false, error: 'Нет доступа' };
   return { ok: true, att, msg };
+}
+
+function getAnnouncementAttachmentAccess(db, attachmentId, userId) {
+  const att = db.prepare(`SELECT * FROM announcement_attachments WHERE id = ?`).get(attachmentId);
+  if (!att) return { ok: false, error: 'Вложение не найдено' };
+  const ann = db.prepare(`SELECT * FROM group_announcements WHERE id = ?`).get(att.announcement_id);
+  if (!ann || ann.deleted_at) return { ok: false, error: 'Объявление не найдено' };
+  const m = db
+    .prepare(`SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?`)
+    .get(ann.group_id, userId);
+  if (!m) return { ok: false, error: 'Нет доступа' };
+  return { ok: true, att, ann };
 }
 
 function collabPasswordBypassForFolder(db, groupId, userId) {
@@ -544,6 +558,84 @@ export function appendOnlyOfficeRoutes(r, io) {
                 },
               }
             : {}),
+          lang: 'ru',
+        },
+        height: '100%',
+        width: '100%',
+      };
+
+      res.json({
+        documentServerUrl: ds,
+        config,
+      });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  /** Document Server: скачивание файла вложения объявления по JWT `oo-ann-att`. */
+  w.get('/announcement-attachments/:attachmentId/onlyoffice/document', async (req, res, next) => {
+    try {
+      const attId = +req.params.attachmentId;
+      const token = typeof req.query.token === 'string' ? req.query.token : '';
+      const v = verifyOoAnnouncementAttachmentToken(token);
+      if (!v || v.attId !== attId) return res.status(403).send('token');
+
+      const att = db.prepare(`SELECT * FROM announcement_attachments WHERE id = ?`).get(attId);
+      if (!att) return res.status(404).send('no att');
+      const ann = db.prepare(`SELECT deleted_at FROM group_announcements WHERE id = ?`).get(att.announcement_id);
+      if (!ann || ann.deleted_at) return res.status(404).send('deleted');
+      const fp = chatAttachmentUploadPath(att.stored_name);
+      if (!fp) return res.status(400).send('bad name');
+      if (!fs.existsSync(fp)) return res.status(404).send('missing');
+      const buf = fs.readFileSync(fp);
+      const mime = att.mime_type || 'application/octet-stream';
+      res.setHeader('Content-Type', mime);
+      res.setHeader('Content-Disposition', 'inline');
+      res.send(buf);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  /** JSON-конфиг OnlyOffice для вложения объявления (только просмотр). */
+  w.post('/announcement-attachments/:attachmentId/onlyoffice/config', requireAuth, async (req, res, next) => {
+    try {
+      const ds = ooBaseUrl();
+      if (!ds)
+        return res.status(501).json({ error: 'OnlyOffice не настроен (ONLYOFFICE_DOCUMENT_SERVER_URL).' });
+
+      const attId = +req.params.attachmentId;
+      const access = getAnnouncementAttachmentAccess(db, attId, req.userId);
+      if (!access.ok) return res.status(403).json({ error: access.error });
+
+      const fn = normalizePossibleMultipartFilename(access.att.file_name) || access.att.file_name;
+      const types = ooAttachmentViewerTypes(fn, access.att.mime_type);
+      if (!types) return res.status(400).json({ error: 'Формат не подходит для просмотра в OnlyOffice' });
+
+      const key = `aa-${attId}-0`;
+      const dlToken = signOoAnnouncementAttachmentToken(attId);
+      const pub = publicBaseUrlFromRequest(req);
+      const documentUrl = `${pub}/api/announcement-attachments/${attId}/onlyoffice/document?token=${encodeURIComponent(dlToken)}`;
+
+      const u = db.prepare(`SELECT id, username, display_name FROM users WHERE id = ?`).get(req.userId);
+      const uName = u?.display_name || u?.username || `user_${req.userId}`;
+      const safeTitle = `${String(path.basename(fn)).replace(/[/\\?%*:|"<>]/g, '_').slice(0, 240)}`;
+
+      const config = {
+        document: {
+          fileType: types.fileType,
+          key,
+          title: safeTitle,
+          url: documentUrl,
+        },
+        documentType: types.documentType,
+        editorConfig: {
+          mode: 'view',
+          user: {
+            id: String(req.userId),
+            name: String(uName).slice(0, 200),
+          },
           lang: 'ru',
         },
         height: '100%',

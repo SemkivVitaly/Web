@@ -692,7 +692,17 @@ export function appendAnnouncementRoutes(r, io) {
     if (!isAuthor && !isAdmin) return res.status(403).json({ error: 'Недостаточно прав' });
     db.prepare(`UPDATE group_announcements SET deleted_at = datetime('now') WHERE id = ?`).run(aid);
     writeAudit(db, req.userId, 'announcement_delete', 'group', ann.group_id, { announcementId: aid });
-    io.to(`group:${ann.group_id}`).emit('announcement:deleted', { announcementId: aid, groupId: ann.group_id });
+    const deletedPayload = { announcementId: aid, groupId: ann.group_id };
+    io.to(`group:${ann.group_id}`).emit('announcement:deleted', deletedPayload);
+    if ((ann.audience || 'all') === 'selected') {
+      const recipientIds = db
+        .prepare(`SELECT user_id FROM announcement_recipients WHERE announcement_id = ?`)
+        .all(aid)
+        .map((r) => r.user_id);
+      for (const uid of recipientIds) {
+        io.to(`user:${uid}`).emit('announcement:deleted', deletedPayload);
+      }
+    }
     res.json({ ok: true });
   });
 }

@@ -103,6 +103,25 @@ export function verifyOoChatAttachmentToken(token) {
   }
 }
 
+/** JWT для URL скачивания вложения объявления Document Server'ом (OnlyOffice). */
+export function signOoAnnouncementAttachmentToken(attachmentId, opts = {}) {
+  const long = !!opts.longLived;
+  return jwt.sign({ typ: 'oo-ann-att', attId: +attachmentId }, JWT_SECRET, {
+    expiresIn: long ? '8h' : '15m',
+  });
+}
+
+/** Проверка oo-ann-att; `{ attId }` или `null`. */
+export function verifyOoAnnouncementAttachmentToken(token) {
+  try {
+    const p = jwt.verify(token, JWT_SECRET);
+    if (p?.typ !== 'oo-ann-att' || p.attId == null) return null;
+    return { attId: +p.attId };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Случайный суффикс 8 hex-символов (~4e9 вариантов) — низкая вероятность коллизии при UNIQUE в БД.
  */
