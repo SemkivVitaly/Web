@@ -80,3 +80,4 @@ cd ../server && npm install && npm start
 - **Frontend**: React + Vite, Socket.io-client. Auth: httpOnly cookie + localStorage JWT для WebSocket.
 
 Данные и файлы остаются на машине, где запущен сервер.
+docker compose up --build -d
