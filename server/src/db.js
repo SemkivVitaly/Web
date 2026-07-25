@@ -241,6 +241,10 @@ try {
   if (!tCols.some((c) => c.name === 'quantity_done')) {
     db.exec(`ALTER TABLE tasks ADD COLUMN quantity_done INTEGER NOT NULL DEFAULT 0`);
   }
+  tCols = db.prepare(`PRAGMA table_info(tasks)`).all();
+  if (!tCols.some((c) => c.name === 'due_at')) {
+    db.exec(`ALTER TABLE tasks ADD COLUMN due_at TEXT`);
+  }
 } catch {
   /* ignore */
 }
@@ -642,6 +646,26 @@ try {
   `);
 } catch (e) {
   console.error('assignment_mod_seen migration', e);
+}
+
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS calendar_reminders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      notes TEXT NOT NULL DEFAULT '',
+      due_at TEXT NOT NULL,
+      done_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_calendar_reminders_owner
+      ON calendar_reminders(group_id, user_id, due_at);
+  `);
+} catch (e) {
+  console.error('calendar_reminders migration', e);
 }
 
 try {

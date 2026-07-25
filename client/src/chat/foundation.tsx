@@ -11,7 +11,7 @@
  * - галерея вложений, превью строки, галочки прочтения;
  * - парсинг `@` и `#` в композере;
  * - SVG-иконки меню сообщений и заголовка;
- * - мелкие UI-компоненты (звезда избранного).
+ * - мелкие UI-компоненты (звезда избранного, строка аккаунта с выходом для модалок).
  *
  * API маршрутов здесь нет — только типы из `../types` и чистые функции / презентация.
  */
@@ -19,6 +19,7 @@
 import { useCallback, useRef, useState } from 'react';
 import type { ReactNode, SVGProps } from 'react';
 import type { Socket } from 'socket.io-client';
+import { uiConfirm } from '../ui/dialogs';
 import type {
   Message,
   GroupSummary,
@@ -26,6 +27,7 @@ import type {
   ChatPref,
   ChatAttachmentIndexItem,
   InvitePolicy,
+  User,
 } from '../types';
 
 /** Текущий выбранный чат в сайдбаре: группа или личный диалог. */
@@ -331,6 +333,35 @@ export function ChatFavStarButton({
     >
       ★
     </button>
+  );
+}
+
+/**
+ * Подпись «вы вошли как …» с кнопкой выхода для модалок, которые нельзя закрыть
+ * или которые перекрывают сайдбар: иначе с чужого аккаунта из них не выбраться.
+ */
+export function ModalAccountBar({ me, onLogout }: { me: User; onLogout: () => void }) {
+  return (
+    <div className="lc-modal-account-bar">
+      <span className="meta lc-modal-account-who">
+        Вы вошли как <strong>{me.displayName}</strong> @{me.tag}
+      </span>
+      <button
+        type="button"
+        className="lc-modal-account-logout"
+        title="Выйти из аккаунта и вернуться к экрану входа"
+        onClick={async () => {
+          const ok = await uiConfirm(`Выйти из аккаунта ${me.displayName} (@${me.tag})?`, {
+            title: 'Выход из аккаунта',
+            okText: 'Выйти',
+            danger: true,
+          });
+          if (ok) onLogout();
+        }}
+      >
+        Выйти
+      </button>
+    </div>
   );
 }
 

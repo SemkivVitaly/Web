@@ -1101,6 +1101,20 @@ export function TaskBoardCanvas({
             }
             quantityTarget = n;
           }
+          const dueQ = await uiPrompt('Срок (ГГГГ-ММ-ДД или ГГГГ-ММ-ДДTЧЧ:ММ; пусто — без срока)', {
+            title: 'Срок задачи',
+            allowEmpty: true,
+            placeholder: '2026-07-25T18:00',
+          });
+          let dueAt: string | undefined;
+          if (dueQ != null && dueQ.trim()) {
+            const tDue = dueQ.trim().replace(' ', 'T');
+            if (!/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$/.test(tDue)) {
+              setErr('Неверный формат срока. Пример: 2026-07-25 или 2026-07-25T18:00');
+              return;
+            }
+            dueAt = tDue;
+          }
           const t = await api<TaskNode>(`/api/task-boards/${boardId}/tasks`, {
             method: 'POST',
             json: {
@@ -1108,6 +1122,7 @@ export function TaskBoardCanvas({
               title: title.trim(),
               description: '',
               ...(quantityTarget != null ? { quantityTarget } : {}),
+              ...(dueAt != null ? { dueAt } : {}),
             },
           });
           const pos = getPos();

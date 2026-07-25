@@ -206,10 +206,54 @@ export type TaskNode = {
   sortOrder: number;
   createdAt: string;
   updatedAt: string;
+  /** Срок (YYYY-MM-DD или YYYY-MM-DDTHH:mm), null — без срока */
+  dueAt?: string | null;
   /** Вложенность при ответе API дерева задач */
   children?: TaskNode[];
   /** Имя доски — в обзорном канбане группы */
   boardName?: string;
+};
+
+export type CalendarEventSource = 'reminder' | 'assignment' | 'board_task';
+
+/**
+ * Событие календаря группы. `dueAt` — «настенное» время без зоны
+ * (`YYYY-MM-DD` или `YYYY-MM-DDTHH:mm`), `day` — его дневная часть.
+ */
+export type CalendarEvent = {
+  id: string;
+  source: CalendarEventSource;
+  title: string;
+  dueAt: string;
+  day: string;
+  status?: string | null;
+  notes?: string;
+  reminderId?: number;
+  doneAt?: string | null;
+  announcementId?: number;
+  taskId?: number;
+  boardId?: number;
+  boardName?: string;
+  boardHasPassword?: boolean;
+  assigneeId?: number | null;
+  /** Задача доски, где пользователь исполнитель или автор */
+  mine?: boolean;
+  progress?: number;
+  quantityTarget?: number | null;
+  quantityDone?: number;
+  kind?: string;
+};
+
+export type CalendarReminder = {
+  id: number;
+  groupId: number;
+  userId: number;
+  title: string;
+  notes: string;
+  dueAt: string;
+  doneAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type TaskCanvasItem = {

@@ -24,6 +24,7 @@ import { appendWorkspaceRoutes } from './workspaceRoutes.js';
 import { writeAudit } from './auditLog.js';
 import { appendOnlyOfficeRoutes } from './onlyOfficeRoutes.js';
 import { appendAnnouncementRoutes } from './announcementRoutes.js';
+import { appendCalendarRoutes } from './calendarRoutes.js';
 import { createRateLimiter } from './rateLimit.js';
 import { unlinkOrphanMessageAttachmentFiles } from './uploadCleanup.js';
 import {
@@ -3012,6 +3013,7 @@ export function createApiRouter(io) {
   appendWorkspaceRoutes(r, io);
   appendOnlyOfficeRoutes(r, io);
   appendAnnouncementRoutes(r, io);
+  appendCalendarRoutes(r, io);
   appendFileRoutes(r);
 
   r.use((_req, res) => {

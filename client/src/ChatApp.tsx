@@ -52,6 +52,7 @@ import {
   type AnnouncementAttachment,
 } from './chat/AnnouncementModals';
 import { MyAssignmentsBadgeButton, MyAssignmentsPanel } from './chat/MyAssignmentsPanel';
+import { GroupCalendarModal } from './chat/GroupCalendarModal';
 import {
   readCollabUnlock,
   rememberDocUnlock,
@@ -4069,6 +4070,15 @@ export default function ChatApp({
                     </button>
                   )}
                   {activeGroup && (
+                    <button
+                      type="button"
+                      style={{ marginLeft: 8 }}
+                      onClick={() => setModal('groupCalendar')}
+                    >
+                      Календарь
+                    </button>
+                  )}
+                  {activeGroup && (
                     <span style={{ marginLeft: 8 }}>
                       <MyAssignmentsBadgeButton
                         count={pendingAnnouncements.length + activeAssignmentCount}
@@ -4524,6 +4534,11 @@ export default function ChatApp({
                               : modUnreadProgress[active.id]}
                           </span>
                         )}
+                      </button>
+                    )}
+                    {activeGroup && (
+                      <button type="button" onClick={() => setModal('groupCalendar')}>
+                        Календарь
                       </button>
                     )}
                     {activeGroup && (
@@ -6983,12 +6998,13 @@ export default function ChatApp({
           statsRefreshKey={announcementStatsRefreshKey}
           canCreate={!!canMod}
           canViewStats={!!canMod}
-          currentUserId={me.id}
+          me={me}
           userRole={activeGroup.role}
           onClose={() => {
             setModal(null);
             if (canMod) void markModAssignmentsSeen(active.id);
           }}
+          onLogout={onLogout}
           onOpenLinkedTask={(taskId) => void openLinkedTaskFromChat(taskId)}
           onOpenImage={openAnnouncementImageLightbox}
           onOpenOnlyOffice={openAnnouncementAttachmentOnlyOffice}
@@ -6996,11 +7012,23 @@ export default function ChatApp({
         />
       )}
 
+      {modal === 'groupCalendar' && active?.kind === 'group' && (
+        <GroupCalendarModal
+          groupId={active.id}
+          socket={ioSocket}
+          onClose={() => setModal(null)}
+          onOpenTask={(taskId) => void openLinkedTaskFromChat(taskId)}
+          onOpenAssignments={() => setMyAssignmentsOpen(true)}
+        />
+      )}
+
       {myAssignmentsOpen && active?.kind === 'group' && (
         <MyAssignmentsPanel
           groupId={active.id}
           open={myAssignmentsOpen}
+          me={me}
           onClose={() => setMyAssignmentsOpen(false)}
+          onLogout={onLogout}
           refreshKey={myAssignmentsRefreshKey}
           onOpenLinkedTask={(taskId) => {
             setMyAssignmentsOpen(false);
@@ -7051,6 +7079,8 @@ export default function ChatApp({
       {announcementAckOpen && pendingAnnouncements.length > 0 && active?.kind === 'group' && (
         <AnnouncementAckModal
           announcements={pendingAnnouncements}
+          me={me}
+          onLogout={onLogout}
           onOpenLinkedTask={(taskId) => void openLinkedTaskFromChat(taskId)}
           onOpenImage={openAnnouncementImageLightbox}
           onOpenOnlyOffice={openAnnouncementAttachmentOnlyOffice}

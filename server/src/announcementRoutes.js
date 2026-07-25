@@ -19,6 +19,30 @@ function sqliteUtcToIso(value) {
   return s;
 }
 
+/** Календарно существующий день YYYY-MM-DD (отсекает, например, 2026-02-30). */
+function isValidDay(s) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [y, m, d] = s.split('-').map(Number);
+  if (m < 1 || m > 12 || d < 1) return false;
+  return d <= new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+/**
+ * Срок объявления: пусто — без срока, иначе YYYY-MM-DD или YYYY-MM-DDTHH:mm.
+ * Приводит к единому виду, чтобы календарь мог сравнивать сроки как строки.
+ * @returns {{ ok: true, value: string | null } | { ok: false }}
+ */
+function normalizeDueAtInput(raw) {
+  if (raw == null || raw === '' || raw === 'null') return { ok: true, value: null };
+  const s = String(raw).trim();
+  if (!s) return { ok: true, value: null };
+  const m = /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}):(\d{2}))?/.exec(s);
+  if (!m || !isValidDay(m[1])) return { ok: false };
+  if (m[2] == null) return { ok: true, value: m[1] };
+  if (+m[2] > 23 || +m[3] > 59) return { ok: false };
+  return { ok: true, value: `${m[1]}T${m[2]}:${m[3]}` };
+}
+
 function rowUser(u) {
   if (!u) return null;
   return {
@@ -193,7 +217,9 @@ function buildAnnouncementPayload(db, row, viewerUserId, includeMyAck = false) {
     audience,
     body: row.body || '',
     createdAt: sqliteUtcToIso(row.created_at) ?? row.created_at,
-    dueAt: row.due_at ? sqliteUtcToIso(row.due_at) ?? row.due_at : null,
+    // Срок задаётся автором как «настенное» время (datetime-local) и хранится без зоны —
+    // добавлять `Z`, как для created_at, нельзя: дедлайн сдвинулся бы на смещение часового пояса.
+    dueAt: row.due_at || null,
     quantityTarget: row.quantity_target ?? null,
     author: rowUser(author),
     attachments: buildAnnouncementAttachments(db, row.id),
@@ -344,7 +370,9 @@ export function appendAnnouncementRoutes(r, io) {
     const body = String(req.body?.body || '').trim();
     const files = req.files?.files || [];
     const linkedTaskId = req.body?.linkedTaskId != null ? +req.body.linkedTaskId : null;
-    const dueAt = req.body?.dueAt ? String(req.body.dueAt).trim() || null : null;
+    const due = normalizeDueAtInput(req.body?.dueAt);
+    if (!due.ok) return res.status(400).json({ error: 'Некорректный срок' });
+    const dueAt = due.value;
     const quantityTarget =
       req.body?.quantityTarget != null && req.body.quantityTarget !== ''
         ? +req.body.quantityTarget

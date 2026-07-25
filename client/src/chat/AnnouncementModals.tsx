@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, apiForm, resolveUrl } from '../api';
 import { uiConfirm } from '../ui/dialogs';
 import type { Attachment, User } from '../types';
-import { formatMessageClock } from './foundation';
+import { ModalAccountBar, formatMessageClock } from './foundation';
 import { MessageImageGrid } from './MessageImageGrid';
 import { chatAttachmentSupportsOnlyOffice } from './onlyOfficeAttachment';
 
@@ -230,9 +230,11 @@ function statusLabel(status: AnnouncementStatsMember['status']): string {
   return 'Не ответил';
 }
 
-/** Блокирующая модалка: без ответа закрыть нельзя. */
+/** Блокирующая модалка: без ответа закрыть нельзя — поэтому здесь же выход из аккаунта. */
 export function AnnouncementAckModal({
   announcements,
+  me,
+  onLogout,
   onResponded,
   onOpenLinkedTask,
   onOpenImage,
@@ -240,6 +242,8 @@ export function AnnouncementAckModal({
   ooEnabled,
 }: {
   announcements: GroupAnnouncement[];
+  me: User;
+  onLogout: () => void;
   onResponded: (announcementId: number) => void;
   onOpenLinkedTask?: (taskId: number, boardId: number) => void;
   onOpenImage?: (attachments: AnnouncementAttachment[], attachmentId: number) => void;
@@ -367,6 +371,7 @@ export function AnnouncementAckModal({
           </div>
         )}
         {err && <p className="error">{err}</p>}
+        <ModalAccountBar me={me} onLogout={onLogout} />
       </div>
     </div>
   );
@@ -378,9 +383,10 @@ export function GroupAnnouncementsModal({
   statsRefreshKey,
   canCreate,
   canViewStats,
-  currentUserId,
+  me,
   userRole,
   onClose,
+  onLogout,
   onOpenLinkedTask,
   onOpenImage,
   onOpenOnlyOffice,
@@ -391,9 +397,10 @@ export function GroupAnnouncementsModal({
   statsRefreshKey: number;
   canCreate: boolean;
   canViewStats: boolean;
-  currentUserId: number;
+  me: User;
   userRole: string;
   onClose: () => void;
+  onLogout: () => void;
   onOpenLinkedTask?: (taskId: number, boardId: number) => void;
   onOpenImage?: (attachments: AnnouncementAttachment[], attachmentId: number) => void;
   onOpenOnlyOffice?: (attachmentId: number, fileName: string) => void;
@@ -606,7 +613,7 @@ export function GroupAnnouncementsModal({
   const selected = announcements.find((a) => a.id === selectedId) ?? null;
   const showTaskStats = stats?.announcement.kind === 'assignment' || stats?.announcement.kind === 'linked_task';
   const canDeleteSelected =
-    selected != null && (userRole === 'admin' || selected.author.id === currentUserId);
+    selected != null && (userRole === 'admin' || selected.author.id === me.id);
 
   return (
     <div
@@ -958,6 +965,7 @@ export function GroupAnnouncementsModal({
             Закрыть
           </button>
         </div>
+        <ModalAccountBar me={me} onLogout={onLogout} />
       </div>
     </div>
   );

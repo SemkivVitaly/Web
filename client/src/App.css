@@ -6712,6 +6712,29 @@ a:hover {
   overflow-y: auto;
 }
 
+/* Строка «вы вошли как …» с выходом — в модалках, откуда иначе не выбраться. */
+.lc-modal-account-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.lc-modal-account-who {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.lc-modal-account-logout {
+  flex: none;
+  font-size: 0.85rem;
+  padding: 0.3rem 0.75rem;
+}
+
 .lc-announcement-recipient-row {
   display: flex;
   align-items: center;
@@ -7326,5 +7349,277 @@ a:hover {
 .lc-overview-kanban-move {
   font-size: 0.7rem;
   padding: 0.15rem 0.4rem;
+}
+
+/* --- Календарь группы --- */
+
+.modal-backdrop.lc-calendar-modal-backdrop {
+  z-index: 50;
+}
+
+.lc-calendar-modal {
+  max-width: min(720px, 96vw);
+  max-height: min(92vh, 960px);
+  overflow-y: auto;
+}
+
+.lc-calendar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.lc-calendar-header h3 {
+  margin: 0;
+}
+
+.lc-calendar-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.75rem;
+}
+
+.lc-calendar-only-mine {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 0.65rem;
+}
+
+.lc-calendar-month-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.65rem;
+}
+
+.lc-calendar-month-label {
+  flex: 1;
+  text-align: center;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.lc-calendar-today-btn {
+  margin-left: auto;
+}
+
+.lc-calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 0.25rem;
+  margin-bottom: 0.5rem;
+}
+
+.lc-calendar-weekday {
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--muted);
+  padding: 0.2rem 0;
+}
+
+.lc-calendar-cell {
+  aspect-ratio: 1;
+  min-height: 2.6rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0.2rem;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+}
+
+.lc-calendar-cell--muted {
+  opacity: 0.45;
+}
+
+.lc-calendar-cell--today {
+  border-color: var(--accent, #2f6fed);
+}
+
+.lc-calendar-cell--selected {
+  background: var(--surface-2, rgba(47, 111, 237, 0.08));
+  box-shadow: inset 0 0 0 1px var(--accent, #2f6fed);
+}
+
+.lc-calendar-cell--overdue .lc-calendar-cell-day {
+  color: var(--danger, #b00020);
+}
+
+.lc-calendar-cell-day {
+  font-size: 0.85rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.lc-calendar-dots {
+  display: flex;
+  gap: 3px;
+  margin-top: 0.15rem;
+}
+
+.lc-calendar-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.lc-calendar-dot--reminder {
+  background: #c9852a;
+}
+
+.lc-calendar-dot--assignment {
+  background: #2f6fed;
+}
+
+.lc-calendar-dot--board {
+  background: #2a9d6a;
+}
+
+.lc-calendar-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.9rem;
+  align-items: center;
+  margin-bottom: 0.75rem;
+  font-size: 0.78rem;
+}
+
+.lc-calendar-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.lc-calendar-error {
+  color: var(--danger, #b00020);
+}
+
+.lc-calendar-day-panel {
+  margin-bottom: 1rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+
+.lc-calendar-day-title {
+  margin: 0 0 0.5rem;
+  text-transform: capitalize;
+  font-size: 1rem;
+}
+
+.lc-calendar-event-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.lc-calendar-event {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.55rem 0.7rem;
+  background: var(--surface-2, rgba(0, 0, 0, 0.03));
+}
+
+.lc-calendar-event--reminder {
+  border-left: 3px solid #c9852a;
+}
+
+.lc-calendar-event--assignment {
+  border-left: 3px solid #2f6fed;
+}
+
+.lc-calendar-event--board_task {
+  border-left: 3px solid #2a9d6a;
+}
+
+.lc-calendar-event--done .lc-calendar-event-title {
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+
+.lc-calendar-event--overdue {
+  background: var(--danger-surface, rgba(176, 0, 32, 0.06));
+}
+
+.lc-calendar-overdue-pill {
+  color: var(--danger, #b00020);
+  border-color: currentColor;
+}
+
+.lc-calendar-event-notes {
+  margin: 0.3rem 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.lc-calendar-event-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.55rem;
+  align-items: baseline;
+}
+
+.lc-calendar-event-source {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+}
+
+.lc-calendar-event-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.4rem;
+}
+
+.lc-calendar-reminder-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+}
+
+.lc-calendar-reminder-form h4 {
+  margin: 0;
+}
+
+.lc-calendar-reminder-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.9rem;
+}
+
+.lc-calendar-reminder-form input,
+.lc-calendar-reminder-form textarea {
+  width: 100%;
+}
+
+.lc-task-due {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
+}
+
+.lc-task-due input[type='datetime-local'] {
+  max-width: 14rem;
 }
 

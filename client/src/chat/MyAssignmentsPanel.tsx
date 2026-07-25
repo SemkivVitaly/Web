@@ -4,6 +4,8 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../api';
+import type { User } from '../types';
+import { ModalAccountBar } from './foundation';
 import { AnnouncementCardBody, type AnnouncementAttachment, type GroupAnnouncement } from './AnnouncementModals';
 
 function taskStatusLabel(s: string | null | undefined): string {
@@ -55,7 +57,9 @@ type EditState = {
 export function MyAssignmentsPanel({
   groupId,
   open,
+  me,
   onClose,
+  onLogout,
   refreshKey,
   onOpenLinkedTask,
   onOpenImage,
@@ -65,7 +69,9 @@ export function MyAssignmentsPanel({
 }: {
   groupId: number;
   open: boolean;
+  me: User;
   onClose: () => void;
+  onLogout: () => void;
   refreshKey: number;
   onOpenLinkedTask?: (taskId: number, boardId: number) => void;
   onOpenImage?: (attachments: AnnouncementAttachment[], attachmentId: number) => void;
@@ -370,6 +376,7 @@ export function MyAssignmentsPanel({
             Закрыть
           </button>
         </div>
+        <ModalAccountBar me={me} onLogout={onLogout} />
       </div>
     </div>
   );

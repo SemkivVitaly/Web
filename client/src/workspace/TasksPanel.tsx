@@ -51,6 +51,31 @@ async function promptOptionalQuantityTarget(): Promise<number | undefined> {
   return n;
 }
 
+/** Пусто — без срока; иначе YYYY-MM-DD или YYYY-MM-DDTHH:mm */
+async function promptOptionalDueAt(): Promise<string | undefined> {
+  const q = await uiPrompt('Срок (ГГГГ-ММ-ДД или ГГГГ-ММ-ДДTЧЧ:ММ; пусто — без срока)', {
+    title: 'Срок задачи',
+    allowEmpty: true,
+    placeholder: '2026-07-25T18:00',
+  });
+  if (q == null) return undefined;
+  const t = q.trim().replace(' ', 'T');
+  if (!t) return undefined;
+  if (!/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$/.test(t)) {
+    await uiAlert('Неверный формат срока. Пример: 2026-07-25 или 2026-07-25T18:00');
+    return undefined;
+  }
+  return t;
+}
+
+function dueAtToInputValue(dueAt: string | null | undefined): string {
+  if (!dueAt) return '';
+  const s = String(dueAt).trim().replace(' ', 'T');
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(s)) return s.slice(0, 16);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return `${s}T09:00`;
+  return '';
+}
+
 // --- sessionStorage: какая доска была открыта в этой вкладке (на группу) ---
 
 const TASKS_BOARD_STORAGE = (groupId: number) => `lc-tasks-selected-board-${groupId}`;
@@ -229,6 +254,10 @@ function formatTaskActivityLine(a: TaskActivityEntry): string {
       return `${name}: цель по количеству: ${p.before == null ? 'нет' : p.before} → ${p.after == null ? 'нет' : p.after}`;
     case 'assignee':
       return `${name}: изменил(а) исполнителя`;
+    case 'due_at':
+      return `${name}: срок ${p.before == null || p.before === '' ? 'нет' : p.before} → ${
+        p.after == null || p.after === '' ? 'нет' : p.after
+      }`;
     case 'parent':
       return `${name}: изменил(а) вложенность в дереве`;
     case 'comment_add': {
@@ -383,6 +412,11 @@ function TaskRow({
   useEffect(() => {
     if (!descDirty.current) setLocalDescription(task.description);
   }, [task.description]);
+  const [localDueAt, setLocalDueAt] = useState(() => dueAtToInputValue(task.dueAt));
+  const dueDirty = useRef(false);
+  useEffect(() => {
+    if (!dueDirty.current) setLocalDueAt(dueAtToInputValue(task.dueAt));
+  }, [task.dueAt]);
   const [commentText, setCommentText] = useState('');
   const [pendingCommentFiles, setPendingCommentFiles] = useState<File[]>([]);
   const [commentsFileDropHover, setCommentsFileDropHover] = useState(false);
@@ -531,6 +565,23 @@ function TaskRow({
             if (localDescription !== task.description) await savePatch({ description: localDescription });
           }}
         />
+        <label className="lc-task-due">
+          <span className="meta">Срок</span>
+          <input
+            type="datetime-local"
+            value={localDueAt}
+            onChange={(e) => {
+              dueDirty.current = true;
+              setLocalDueAt(e.target.value);
+            }}
+            onBlur={async () => {
+              dueDirty.current = false;
+              const next = localDueAt.trim() || null;
+              const prev = dueAtToInputValue(task.dueAt) || null;
+              if (next !== prev) await savePatch({ dueAt: next });
+            }}
+          />
+        </label>
       </div>
       <div className="lc-task-controls">
         <select
@@ -595,6 +646,7 @@ function TaskRow({
             if (!title) return;
             const description = (await uiPrompt('Описание подзадачи (необязательно)', { title: 'Новая подзадача', allowEmpty: true })) || '';
             const quantityTarget = await promptOptionalQuantityTarget();
+            const dueAt = await promptOptionalDueAt();
             try {
               await api(`/api/task-boards/${boardId}/tasks`, {
                 method: 'POST',
@@ -604,6 +656,7 @@ function TaskRow({
                   title,
                   description: description.trim() || undefined,
                   ...(quantityTarget != null ? { quantityTarget } : {}),
+                  ...(dueAt != null ? { dueAt } : {}),
                 },
               });
               onChanged();
@@ -1341,6 +1394,7 @@ export function TasksPanel({
                 if (!title) return;
                 const description = (await uiPrompt('Описание (необязательно)', { title: 'Новая задача', allowEmpty: true })) || '';
                 const quantityTarget = await promptOptionalQuantityTarget();
+                const dueAt = await promptOptionalDueAt();
                 try {
                   await api(`/api/task-boards/${selectedBoard}/tasks`, {
                     method: 'POST',
@@ -1349,6 +1403,7 @@ export function TasksPanel({
                       title,
                       description: description.trim() || undefined,
                       ...(quantityTarget != null ? { quantityTarget } : {}),
+                      ...(dueAt != null ? { dueAt } : {}),
                     },
                   });
                   loadTasks();

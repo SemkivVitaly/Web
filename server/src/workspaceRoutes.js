@@ -341,6 +341,32 @@ function promoteCollabFolderChildrenToParent(db, folderId, newParentId) {
   ).run(newParentId, folderId);
 }
 
+/**
+ * Календарно существующий день YYYY-MM-DD. Через `new Date` проверять нельзя:
+ * V8 молча переносит 2026-02-30 на 2 марта вместо Invalid Date.
+ */
+function isValidDay(s) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [y, m, d] = s.split('-').map(Number);
+  if (m < 1 || m > 12 || d < 1) return false;
+  return d <= new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+/**
+ * Срок задачи: `YYYY-MM-DD` или `YYYY-MM-DDTHH:mm` (как в объявлениях). Пусто — снять срок.
+ * @returns {{ ok: true, value: string | null } | { ok: false }}
+ */
+function normalizeDueAtInput(raw) {
+  if (raw == null || raw === '' || raw === 'null') return { ok: true, value: null };
+  const s = String(raw).trim().replace(' ', 'T');
+  if (!s) return { ok: true, value: null };
+  const m = /^(\d{4}-\d{2}-\d{2})(?:T(\d{2}):(\d{2}))?/.exec(s);
+  if (!m || !isValidDay(m[1])) return { ok: false };
+  if (m[2] == null) return { ok: true, value: m[1] };
+  if (+m[2] > 23 || +m[3] > 59) return { ok: false };
+  return { ok: true, value: `${m[1]}T${m[2]}:${m[3]}` };
+}
+
 function buildTaskTreeWithRollup(rows, db) {
   const rawById = Object.fromEntries(rows.map((t) => [t.id, t]));
   const byId = Object.fromEntries(
@@ -363,6 +389,7 @@ function buildTaskTreeWithRollup(rows, db) {
           createdById: t.created_by ?? null,
           assignee: t.assignee_id ? rowUser(db.prepare(`SELECT * FROM users WHERE id = ?`).get(t.assignee_id)) : null,
           sortOrder: t.sort_order,
+          dueAt: t.due_at || null,
           createdAt: t.created_at,
           updatedAt: t.updated_at,
         },
@@ -1178,11 +1205,13 @@ export function appendWorkspaceRoutes(r, io) {
 
   w.post('/task-boards/:boardId/tasks', requireAuth, (req, res) => {
     const bid = +req.params.boardId;
-    const { password, parentId, title, description, status, progress, assigneeId, quantityTarget } =
+    const { password, parentId, title, description, status, progress, assigneeId, quantityTarget, dueAt } =
       req.body || {};
     const a = checkBoardAccess(db, bid, req.userId, password);
     if (!a.ok) return res.status(403).json({ error: a.error });
     if (!title) return res.status(400).json({ error: 'title' });
+    const due = normalizeDueAtInput(dueAt);
+    if (!due.ok) return res.status(400).json({ error: 'Некорректный срок выполнения' });
     if (parentId) {
       const p = db.prepare(`SELECT id FROM tasks WHERE id = ? AND board_id = ?`).get(parentId, bid);
       if (!p) return res.status(400).json({ error: 'Неверный parentId' });
@@ -1204,7 +1233,7 @@ export function appendWorkspaceRoutes(r, io) {
     }
     const info = db
       .prepare(
-        `INSERT INTO tasks (board_id, parent_id, title, description, status, progress, quantity_target, quantity_done, assignee_id, created_by) VALUES (?,?,?,?,?,?,?,?,?,?)`
+        `INSERT INTO tasks (board_id, parent_id, title, description, status, progress, quantity_target, quantity_done, assignee_id, created_by, due_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`
       )
       .run(
         bid,
@@ -1216,7 +1245,8 @@ export function appendWorkspaceRoutes(r, io) {
         qtyTarget,
         qtyDone,
         assigneeId || null,
-        req.userId
+        req.userId,
+        due.value
       );
     emitTasksRefresh(io, a.board.group_id, bid);
     const newTid = info.lastInsertRowid;
@@ -1224,6 +1254,7 @@ export function appendWorkspaceRoutes(r, io) {
       title: String(title).trim(),
       quantityTarget: qtyTarget,
       parentId: parentId || null,
+      dueAt: due.value,
     });
     auditGroup(db, req.userId, a.board.group_id, 'task_create', {
       taskId: newTid,
@@ -1297,9 +1328,16 @@ export function appendWorkspaceRoutes(r, io) {
       sortOrder,
       quantityTarget,
       quantityAdd,
+      dueAt,
     } = req.body || {};
     const a = checkBoardAccess(db, row.board_id, req.userId, password);
     if (!a.ok) return res.status(403).json({ error: a.error });
+    let dueAtN = row.due_at || null;
+    if (dueAt !== undefined) {
+      const due = normalizeDueAtInput(dueAt);
+      if (!due.ok) return res.status(400).json({ error: 'Некорректный срок выполнения' });
+      dueAtN = due.value;
+    }
     if (parentId !== undefined && parentId !== null) {
       if (parentId === tid) return res.status(400).json({ error: 'Цикл' });
       const p = db.prepare(`SELECT id FROM tasks WHERE id = ? AND board_id = ?`).get(parentId, row.board_id);
@@ -1381,8 +1419,8 @@ export function appendWorkspaceRoutes(r, io) {
     const parentN = parentId !== undefined ? parentId : row.parent_id;
     const sortN = sortOrder !== undefined ? +sortOrder : row.sort_order;
     db.prepare(
-      `UPDATE tasks SET title=?, description=?, status=?, progress=?, quantity_target=?, quantity_done=?, assignee_id=?, parent_id=?, sort_order=?, updated_at=datetime('now') WHERE id=?`
-    ).run(titleN, descN, statusN, progN, qtyTarget, qtyDone, assigneeN, parentN, sortN, tid);
+      `UPDATE tasks SET title=?, description=?, status=?, progress=?, quantity_target=?, quantity_done=?, assignee_id=?, parent_id=?, sort_order=?, due_at=?, updated_at=datetime('now') WHERE id=?`
+    ).run(titleN, descN, statusN, progN, qtyTarget, qtyDone, assigneeN, parentN, sortN, dueAtN, tid);
 
     if (titleN !== row.title) {
       logTaskActivity(db, tid, req.userId, 'title', { before: row.title, after: titleN });
@@ -1413,6 +1451,9 @@ export function appendWorkspaceRoutes(r, io) {
           done: qtyDone,
         });
       }
+    }
+    if (dueAt !== undefined && dueAtN !== (row.due_at || null)) {
+      logTaskActivity(db, tid, req.userId, 'due_at', { before: row.due_at || null, after: dueAtN });
     }
     if (assigneeId !== undefined && assigneeN !== row.assignee_id) {
       logTaskActivity(db, tid, req.userId, 'assignee', { from: row.assignee_id, to: assigneeN });
