@@ -48,3 +48,9 @@ services:
     environment:
       JWT_ENABLED: 'false'
       ALLOW_PRIVATE_IP_ADDRESS: 'true'
+    # Лимиты вставки/переноса ячеек и крупных правок (см. deploy/onlyoffice/).
+    # Без этого Document Server по умолчанию режет websocket-пакет ~1.5MB
+    # и суммарный размер изменений (~150MB) — появляется ошибка про «размер
+    # вставляемых данных» / «size of actions exceeds the limitation».
+    volumes:
+      - ./deploy/onlyoffice/local-production-linux.json:/etc/onlyoffice/documentserver/local-production-linux.json:ro

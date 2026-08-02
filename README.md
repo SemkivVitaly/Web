@@ -69,6 +69,8 @@ cd ../server && npm install && npm start
 | `ONLYOFFICE_PORT` | Только **Docker Compose**: порт на **хосте** для сервиса `onlyoffice` (по умолчанию **8081**). Проброс: `HOST:80` внутри контейнера. Должен совпадать с портом в `ONLYOFFICE_DOCUMENT_SERVER_URL`, если задаёте URL вручную |
 | `PUBLIC_BASE_URL` | Базовый URL вашего API **как его видит Document Server** (скачивание файлов, callback). Если не задан — берётся из запроса к API (`Host`). В **docker compose** по умолчанию **`http://localchat:3780`** (сеть между контейнерами). Не подменяйте на `host.docker.internal`, если документы перестали открываться |
 | `ONLYOFFICE_JWT_SECRET` | Секрет JWT для converter OnlyOffice (если включён JWT на стороне DS) |
+
+**OnlyOffice: ошибка при вставке/переносе ячеек.** Сообщение вроде «размер вставляемых данных превышает разрешённый» идёт от Document Server, не от LocalChat. В compose смонтирован [`deploy/onlyoffice/local-production-linux.json`](deploy/onlyoffice/local-production-linux.json): снят лимит `maxChangesSize`, увеличены `websocketMaxPayloadSize` и `maxRequestChanges`. После правки: `docker compose up -d onlyoffice` (при необходимости `docker compose restart onlyoffice`).
 | `SQLITE_OPTIMIZE` | `0` — не выполнять `PRAGMA optimize` при старте (по умолчанию выполняется) |
 | `COLLAB_MAX_UPDATE_B64` | Макс. длина base64 одного апдейта collab (по умолчанию ~1.2M символов) |
 

@@ -1,0 +1,20 @@
+{
+  "services": {
+    "CoAuthoring": {
+      "server": {
+        "maxRequestChanges": 1000000,
+        "limits_tempfile_upload": 1048576000,
+        "limits_image_size": 104857600
+      },
+      "editor": {
+        "maxChangesSize": "0mb",
+        "websocketMaxPayloadSize": "64MB"
+      }
+    }
+  },
+  "FileConverter": {
+    "converter": {
+      "maxDownloadBytes": 1048576000
+    }
+  }
+}
