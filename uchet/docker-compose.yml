@@ -1,0 +1,61 @@
+services:
+  act-management:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: act-management-system
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=file:/app/data/custom.db
+      - AUTH_SECRET=${AUTH_SECRET:-}
+      # Единый вход через чат LocalChat (по желанию):
+      #   CHAT_URL        — адрес чата, как его видит контейнер учёта
+      #   CHAT_PUBLIC_URL — адрес чата для браузера (кнопки/ссылки)
+      #   CHAT_GROUP_ID   — ID группы, чьи роли дают доступ (ОБЯЗАТЕЛЬНО для
+      #                     входа через чат: по имени пускать небезопасно)
+      - CHAT_URL=${CHAT_URL:-}
+      - CHAT_PUBLIC_URL=${CHAT_PUBLIC_URL:-}
+      - CHAT_GROUP_ID=${CHAT_GROUP_ID:-}
+      - CHAT_GROUP_NAME=${CHAT_GROUP_NAME:-УТК}
+      # Двусторонняя синхронизация с общим общим Excel-журналом участка
+      # (примонтируйте сетевую папку в volumes и укажите путь):
+      # - SYNC_FILE=/share/Журнал.xlsx
+      # - SYNC_INTERVAL_SECONDS=60
+      # Совместное редактирование в браузере (OnlyOffice) — включено.
+      # APP_URL — адрес сайта, как его видит контейнер Document Server;
+      # адрес самого редактора браузер вычисляет сам (тот же хост, :8080).
+      # Не нравится — закомментируйте APP_URL и сервис onlyoffice ниже.
+      - APP_URL=http://act-management:3000
+      # Секрет подписи OnlyOffice: генерируется скриптом start-docker.sh
+      # (известный секрет в репозитории позволял подделать сохранение журнала)
+      - ONLYOFFICE_JWT_SECRET=${ONLYOFFICE_JWT_SECRET:?Запустите через ./start-docker.sh — он сгенерирует секреты}
+    volumes:
+      # Persist SQLite database
+      - act-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/acts"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Редактор таблиц для /editor (совместное редактирование журнала)
+  onlyoffice:
+    image: onlyoffice/documentserver
+    container_name: onlyoffice
+    ports:
+      - "8080:80"
+    environment:
+      - JWT_SECRET=${ONLYOFFICE_JWT_SECRET:?Запустите через ./start-docker.sh — он сгенерирует секреты}
+    volumes:
+      - onlyoffice-data:/var/www/onlyoffice/Data
+    restart: unless-stopped
+
+volumes:
+  act-data:
+    driver: local
+  onlyoffice-data:
+    driver: local

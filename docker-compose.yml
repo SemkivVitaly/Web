@@ -1,20 +1,11 @@
-# LocalChat: API + веб + OnlyOffice (документы Word/Excel в группах).
+# LocalChat: API + веб + OnlyOffice + Точка сбора (uchet).
 #
 # Запуск:  docker compose up --build -d
-# HTTP:    http://localhost:3780
-# OnlyOffice: порт на хосте задаётся ONLYOFFICE_PORT в .env (по умолчанию 8081)
+# Чат:     http://localhost:3780
+# Учёт:    http://localhost:3000  (вкладка «Точка сбора» в группе)
+# OnlyOffice: порт на хосте ONLYOFFICE_PORT (по умолчанию 8081)
 #
-# Доступ с других устройств в LAN:
-#   1) В .env укажите LAN_HOST=<IP этого ПК>
-#   2) http://<LAN_HOST>:3780
-#
-# Данные на диске Windows (не Docker volume):
-#   server/data/     — SQLite + collab-office-files (документы) + archives/ (архивы удалённых групп)
-#   server/uploads/  — вложения чата
-#
-# OnlyOffice JWT (опционально, для production):
-#   В onlyoffice.environment задайте JWT_ENABLED: 'true' и JWT_SECRET, совпадающий с ONLYOFFICE_JWT_SECRET на API.
-#   По умолчанию JWT отключён — локальный Docker работает без доп. настройки.
+# LAN: в .env укажите LAN_HOST=<IP этого ПК>
 
 services:
   localchat:
@@ -29,14 +20,44 @@ services:
       PORT: '3780'
       HOST: 0.0.0.0
       JWT_SECRET: ${JWT_SECRET:-docker-dev-change-jwt-secret}
-      # Plain HTTP LAN: do not set Secure cookies or CSP upgrade-insecure-requests (see USE_HTTPS / COOKIE_SECURE).
       COOKIE_SECURE: ${COOKIE_SECURE:-0}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3780,http://127.0.0.1:3780,http://localchat:3780,http://${LAN_HOST:-localhost}:3780}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3780,http://127.0.0.1:3780,http://localchat:3780,http://${LAN_HOST:-localhost}:3780,http://localhost:3000,http://127.0.0.1:3000,http://${LAN_HOST:-localhost}:3000}
       ONLYOFFICE_DOCUMENT_SERVER_URL: ${ONLYOFFICE_DOCUMENT_SERVER_URL:-http://${LAN_HOST:-localhost}:${ONLYOFFICE_PORT:-8081}}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localchat:3780}
     volumes:
       - ./server/data:/app/server/data
       - ./server/uploads:/app/server/uploads
+
+  uchet:
+    build:
+      context: ./uchet
+      dockerfile: Dockerfile
+    container_name: localchat-uchet
+    ports:
+      - '${UCHET_PORT:-3000}:3000'
+    depends_on:
+      - localchat
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      HOSTNAME: '0.0.0.0'
+      DATABASE_URL: file:/app/data/custom.db
+      UCHET_DATA_DIR: /app/data
+      UCHET_DB_TEMPLATE: /app/db-template/custom.db
+      AUTH_SECRET: ${UCHET_AUTH_SECRET:-docker-dev-change-uchet-auth-secret}
+      CHAT_URL: http://localchat:3780
+      CHAT_PUBLIC_URL: ${CHAT_PUBLIC_URL:-http://${LAN_HOST:-localhost}:3780}
+      FRAME_ANCESTORS: ${FRAME_ANCESTORS:-http://localhost:3780,http://127.0.0.1:3780,http://${LAN_HOST:-localhost}:3780}
+      APP_URL: ${UCHET_APP_URL:-http://localhost:3000}
+    volumes:
+      - ./uchet/data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'wget', '--no-verbose', '--tries=1', '--spider', 'http://localhost:3000/api/health']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   onlyoffice:
     image: onlyoffice/documentserver:latest
@@ -48,9 +69,5 @@ services:
     environment:
       JWT_ENABLED: 'false'
       ALLOW_PRIVATE_IP_ADDRESS: 'true'
-    # Лимиты вставки/переноса ячеек и крупных правок (см. deploy/onlyoffice/).
-    # Без этого Document Server по умолчанию режет websocket-пакет ~1.5MB
-    # и суммарный размер изменений (~150MB) — появляется ошибка про «размер
-    # вставляемых данных» / «size of actions exceeds the limitation».
     volumes:
       - ./deploy/onlyoffice/local-production-linux.json:/etc/onlyoffice/documentserver/local-production-linux.json:ro

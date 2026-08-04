@@ -1,0 +1,16 @@
+# Allow only build artifacts into the runtime image
+*
+!/.next/
+!/.next/**
+!/public/
+!/public/**
+!/db-template/
+!/db-template/**
+!/scripts/
+!/scripts/migrate-db.mjs
+!/node_modules/
+!/node_modules/@prisma/
+!/node_modules/@prisma/**
+!/node_modules/.prisma/
+!/node_modules/.prisma/**
+!/package.json

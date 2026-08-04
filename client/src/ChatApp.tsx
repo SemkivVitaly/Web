@@ -125,6 +125,9 @@ const MessageAttachmentOoView = lazy(() =>
 const TasksPanel = lazy(() =>
   import('./workspace/TasksPanel').then((m) => ({ default: m.TasksPanel }))
 );
+const RallyPointPanel = lazy(() =>
+  import('./workspace/RallyPointPanel').then((m) => ({ default: m.RallyPointPanel }))
+);
 
 /** Размер страницы при первой загрузке ленты и при подгрузке «старее» (`before=id`). */
 const MESSAGES_PAGE_SIZE = 80;
@@ -4118,6 +4121,16 @@ export default function ChatApp({
                     >
                       Задачи
                     </button>
+                    <button
+                      type="button"
+                      className={groupTab === 'gathering' ? 'primary' : ''}
+                      onClick={() => {
+                        clearCollabOpenFromTasksSession(active.id);
+                        setGroupTab('gathering');
+                      }}
+                    >
+                      Точка сбора
+                    </button>
                   </div>
                 </div>
               </div>
@@ -4580,6 +4593,16 @@ export default function ChatApp({
                       >
                         Задачи
                       </button>
+                      <button
+                        type="button"
+                        className={groupTab === 'gathering' ? 'primary' : ''}
+                        onClick={() => {
+                          clearCollabOpenFromTasksSession(active.id);
+                          setGroupTab('gathering');
+                        }}
+                      >
+                        Точка сбора
+                      </button>
                     </div>
                   </div>
                 )}
@@ -4642,6 +4665,13 @@ export default function ChatApp({
                     taskRevealRequest={taskRevealFromChat}
                     onTaskRevealHandled={clearTaskRevealFromChat}
                   />
+                </Suspense>
+              </div>
+            )}
+            {active.kind === 'group' && groupTab === 'gathering' && (
+              <div className="messages lc-workspace-messages lc-workspace-messages--rally">
+                <Suspense fallback={<p className="meta lc-workspace-suspense">Загрузка точки сбора…</p>}>
+                  <RallyPointPanel groupId={active.id} />
                 </Suspense>
               </div>
             )}
@@ -6179,6 +6209,18 @@ export default function ChatApp({
                   }}
                 >
                   Задачи
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={groupTab === 'gathering'}
+                  className={`lc-mobile-group-dock-btn${groupTab === 'gathering' ? ' lc-mobile-group-dock-btn--active' : ''}`}
+                  onClick={() => {
+                    clearCollabOpenFromTasksSession(active.id);
+                    setGroupTab('gathering');
+                  }}
+                >
+                  Точка сбора
                 </button>
               </nav>
             )}

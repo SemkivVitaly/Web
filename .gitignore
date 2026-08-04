@@ -2,5 +2,15 @@ node_modules/
 server/data/
 server/uploads/
 client/dist/
+client/tsconfig.tsbuildinfo
+uchet/node_modules/
+uchet/.next/
+uchet/db/
+uchet/data/
+uchet/db-template/
+uchet-build.log
 *.log
 .env
+uchet/.env
+
+uchet/prisma/db-template/

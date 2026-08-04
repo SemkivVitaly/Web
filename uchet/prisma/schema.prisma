@@ -1,0 +1,207 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Акт - основной документ. Изделие не отделяется от своего акта!
+model Act {
+  id            String      @id @default(cuid())
+  actNumber     String      // Номер акта; НЕ уникален: в журнале бывают две строки одного акта (частичные отгрузки)
+  clientKey     String?  @unique // ключ идемпотентности офлайн-очереди (повтор не создаёт дубль)
+  actDate       DateTime          // Дата акта
+  actTime       String            // Время акта (формат HH:mm)
+  actType       String            // Тип акта (производство, приемка, инвентаризация и т.д.)
+  productId     String?           // ID типа продукции (опционально для обратной совместимости)
+  product       ProductType?      @relation(fields: [productId], references: [id], onDelete: SetNull)
+  quantity      Int               // Количество продукции
+  source        String   @default("Склад") // Источник поступления (Склад, Монтажка, ...)
+  purpose       String   @default("Тестирование") // Назначение акта приёмки: Тестирование / Инспекция / ...
+  // Статус по техпроцессу: accepted, input_control, in_progress, stopped,
+  // output_control, ready_to_ship, shipped (см. src/lib/statuses.ts)
+  status        String      @default("accepted")
+  employeeId    String?           // ID сотрудника (опционально)
+  employeeName  String?           // Имя сотрудника (опционально)
+
+  // Поля журнала (формат общим Excel-журналом участка)
+  ncActNumber     String?         // Акт несоответствия
+  repairQty       Int      @default(0) // Кол-во в ремонте
+  shippedQty      Int      @default(0) // Кол-во Отгружен (колонка журнала)
+  analysisQty     Int      @default(0) // Кол-во на анализе у разработчика (считается из дефектов)
+  plannedShipAt   DateTime?       // к Отгрузке (дата+время)
+  actualShipAt    DateTime?       // факт Отгр (дата+время)
+  outputControlBy String?         // Выполнил вых. контроль (Т-25...)
+  takenBy         String?         // Подпись о взятии в работу
+  notes           String?         // Примечание
+
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  // Связи
+  shipments     Shipment[]
+  actionLogs    ActionLog[]
+  defects       Defect[]
+  units         Unit[]
+
+  @@index([actNumber])
+  @@map("acts")
+}
+
+// Изделие в акте (серийный номер). Задел под QR: при приёмке сканируются
+// серийники всех изделий акта — прослеживаемость до каждой штуки.
+// Изделие не отделяется от своего акта, поэтому серийник живёт внутри акта.
+model Unit {
+  id        String   @id @default(cuid())
+  actId     String
+  act       Act      @relation(fields: [actId], references: [id], onDelete: Cascade)
+  serial    String   // Серийный номер (со сканера QR/штрих-кода)
+
+  // Пооперационная прослеживаемость: кто и когда работал с ЭТИМ изделием на каждой стадии
+  acceptedBy      String?   // принял со склада (старший техник)
+  acceptedAt      DateTime?
+  inputControlBy  String?   // входной контроль — осмотр SMD
+  inputControlAt  DateTime?
+  testedBy        String?   // функциональное тестирование — кто сделал
+  testedAt        DateTime?
+  outputControlBy String?   // выходной контроль (старший техник)
+  outputControlAt DateTime?
+  unitState       String   @default("accepted") // accepted|input_control|in_progress|output_control|ready|shipped
+
+  createdAt DateTime @default(now())
+
+  @@unique([actId, serial]) // в одном акте серийник не повторяется
+  @@index([serial])         // поиск акта по серийнику
+  @@map("units")
+}
+
+// Несоответствие/дефект, найденный при тестировании
+model Defect {
+  id          String    @id @default(cuid())
+  actId       String
+  act         Act       @relation(fields: [actId], references: [id], onDelete: Cascade)
+  // Тип: new (новый), repeated (уже был), mass (массовый, >2 одинаковых),
+  // hardware (аппаратная поломка), analysis (на анализ разработчику)
+  kind        String
+  // Состояние: in_repair, isolator (изолятор), on_analysis (у разработчика),
+  // awaiting_decision (массовый — ждём решения), returned (возвращён в акт)
+  state       String    @default("in_repair")
+  quantity    Int       @default(1)
+  labelNumber String?   // Ярлык несоответствия
+  serial      String?   // Серийный номер конкретного изделия (если известен)
+  designator  String?   // Десигнатор — позиция элемента на плате (C10, R7...)
+  description String?
+  reportedBy  String?   // Тестировщик
+  clientKey   String?   @unique // ключ идемпотентности офлайн-очереди
+  checkedBy   String?   // Проверяющий (второе лицо на бумажном ярлыке)
+  createdAt   DateTime  @default(now())
+  resolvedAt  DateTime?
+
+  @@map("defects")
+}
+
+// Отгрузка - привязана к акту
+model Shipment {
+  id            String     @id @default(cuid())
+  shipmentNumber String    @unique // Номер отгрузки (SHP-001...)
+  actId         String
+  act           Act        @relation(fields: [actId], references: [id], onDelete: Cascade)
+  shipmentDate  DateTime        // Дата отгрузки
+  shipmentTime  String          // Время отгрузки (формат HH:mm)
+  employeeId    String?         // ID сотрудника (опционально)
+  employeeName  String?         // Имя сотрудника (опционально)
+  notes         String?         // Примечание
+  needsAnalysis Boolean   @default(false) // На анализ
+  needsRepair   Boolean   @default(false) // На ремонт
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  @@map("shipments")
+}
+
+// Лог действий - автоматическое логирование всех операций
+model ActionLog {
+  id          String   @id @default(cuid())
+  actionType  String   // Тип действия: CREATE_ACT, UPDATE_ACT, CREATE_SHIPMENT, EXPORT_REPORT
+  entityType  String   // Тип сущности: ACT, SHIPMENT
+  entityId    String   // ID сущности
+  entityNumber String? // Номер сущности для удобства
+  description String   // Описание действия
+  changes     String?  // JSON с изменениями (до/после)
+  userId      String?  // Пользователь (если будет авторизация)
+  actId       String?  // Связь с актом (опционально)
+  act         Act?     @relation(fields: [actId], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+
+  @@index([actId, actionType])
+  @@index([createdAt])
+  @@map("action_logs")
+}
+
+// Справочник типов актов (для расширяемости)
+model ActType {
+  id          String   @id @default(cuid())
+  code        String   @unique // Код типа
+  name        String   // Название типа
+  description String?  // Описание
+  isActive    Boolean  @default(true)
+  sortOrder   Int      @default(0)
+
+  @@map("act_types")
+}
+
+// Справочник типов продукции (настраивается администратором)
+model ProductType {
+  id          String   @id @default(cuid())
+  code        String   @unique // Код изделия (например: PROD-001)
+  name        String   // Название изделия (например: "Деталь X-100")
+  sku         String?  // Артикул/SKU
+  category    String?  // Категория (для группировки)
+  unit        String   @default("шт.") // Единица измерения
+  description String?  // Описание изделия
+  isActive    Boolean  @default(true) // Активен или архивирован
+  sortOrder   Int      @default(0) // Порядок отображения
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Связи с актами
+  acts        Act[]
+  defectCatalog DefectCatalog[]
+
+  @@map("product_types")
+}
+
+// Каталог типовых формулировок дефектов (лист «Дефекты» бумажного акта
+// несоответствия). Привязан к изделию; без изделия — общая формулировка.
+model DefectCatalog {
+  id        String       @id @default(cuid())
+  productId String?
+  product   ProductType? @relation(fields: [productId], references: [id], onDelete: Cascade)
+  text      String       // формулировка («Непропай вывода элемента»...)
+  sortOrder Int          @default(0)
+  isActive  Boolean      @default(true)
+  createdAt DateTime     @default(now())
+
+  @@index([productId])
+  @@map("defect_catalog")
+}
+
+// Сотрудники и роли: tester (тестировщик) < senior (старший тестировщик) < boss (начальник)
+model Employee {
+  id        String   @id @default(cuid())
+  code      String   @unique // табельный код: Т-25
+  chatTag   String?  @unique // тег аккаунта в LocalChat (привязка для входа через чат)
+  name      String
+  role      String   @default("tester")
+  pin       String   // хэш PIN-кода
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@map("employees")
+}

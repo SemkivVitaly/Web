@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Производственный учёт: журнал актов с отметкой контроля -->
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="#2a78d6"/>
+  <rect x="17" y="12" width="30" height="40" rx="4" fill="#ffffff"/>
+  <rect x="25" y="8" width="14" height="9" rx="3" fill="#1b4f8f"/>
+  <rect x="22" y="24" width="14" height="3.5" rx="1.75" fill="#9db8d8"/>
+  <rect x="22" y="31" width="20" height="3.5" rx="1.75" fill="#9db8d8"/>
+  <rect x="22" y="38" width="11" height="3.5" rx="1.75" fill="#9db8d8"/>
+  <circle cx="42" cy="44" r="9" fill="#1baf7a"/>
+  <path d="M37.5 44.2l3 3 5-5.6" stroke="#ffffff" stroke-width="2.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

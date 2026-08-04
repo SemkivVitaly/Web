@@ -33,8 +33,8 @@ import type {
 /** Текущий выбранный чат в сайдбаре: группа или личный диалог. */
 export type Active = { kind: 'group' | 'direct'; id: number };
 
-/** Подвкладка внутри группы: лента, совместные документы или задачи. */
-export type GroupTab = 'chat' | 'collab' | 'tasks';
+/** Подвкладка внутри группы: лента, документы, задачи или точка сбора. */
+export type GroupTab = 'chat' | 'collab' | 'tasks' | 'gathering';
 
 /** Ключ localStorage для сохранения последнего чата и вкладок (на пользователя). */
 const navStateKey = (userId: number) => `localchat_nav_v1_u${userId}`;
@@ -71,7 +71,7 @@ export function loadNavState(userId: number): NavPersist {
     }
     const gt = o?.groupTab;
     const groupTab: GroupTab =
-      gt === 'collab' || gt === 'tasks' || gt === 'chat' ? gt : 'chat';
+      gt === 'collab' || gt === 'tasks' || gt === 'gathering' || gt === 'chat' ? gt : 'chat';
     const sct = o?.sidebarChatTab;
     const sidebarChatTab = typeof sct === 'string' && sct.length > 0 ? sct : 'groups';
     return { active, groupTab, sidebarChatTab };
